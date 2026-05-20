@@ -7,3 +7,8 @@ edition = "2024"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/bdolgov/evmqtt-rs"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
