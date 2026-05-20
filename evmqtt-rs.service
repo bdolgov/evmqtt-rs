@@ -1,0 +1,19 @@
+# Systemd configuration for evmqtt-rs.
+
+[Unit]
+Description=evmqtt-rs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/evmqtt-rs -c /etc/evmqtt-rs.toml
+Restart=on-failure
+RestartSec=3
+# Don't run as root.
+DynamicUser=yes
+# Required to have access to input devices.
+SupplementaryGroups=input
+Environment=EVMQTT_LOG=info
+
+[Install]
+WantedBy=multi-user.target

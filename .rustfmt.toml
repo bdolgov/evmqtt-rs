@@ -1,0 +1,5 @@
+wrap_comments = true
+comment_width = 100
+imports_granularity = "Module"
+group_imports = "One"
+reorder_impl_items = true
