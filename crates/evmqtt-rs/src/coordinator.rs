@@ -230,24 +230,26 @@ impl Coordinator {
     }
 
     async fn on_enable(&mut self, slug: String, on: bool) {
-        let Some(rec) = self.db.find(&slug) else {
-            debug!(
-                %slug,
-                "enable command for unknown slug; ignoring (might be a stale retained message)",
-            );
-            return;
+        let rec = match self.db.find_mut(&slug) {
+            Some(r) if r.enabled == on => {
+                debug!(%slug, on, "enable command is a no-op; state already matches");
+                return;
+            }
+            Some(r) => {
+                r.enabled = on;
+                r.clone()
+            }
+            None => {
+                debug!(
+                    %slug,
+                    "enable command for unknown slug; ignoring (might be a stale retained message)",
+                );
+                return;
+            }
         };
-        if rec.enabled == on {
-            debug!(%slug, on, "enable command is a no-op; state already matches");
-            return;
-        }
-        if let Some(rec_mut) = self.db.find_mut(&slug) {
-            rec_mut.enabled = on;
-        }
         if let Err(e) = self.db.save_atomic(&self.db_path) {
             warn!(error = %e, "failed to persist DB after enable change");
         }
-        let rec = self.db.find(&slug).expect("known slug").clone();
         info!(%slug, enabled = on, "enabled-state change applied");
         self.publish_enabled_mirror(&rec).await;
 
@@ -336,5 +338,161 @@ impl Coordinator {
         if let Err(e) = self.mqtt.publish_bytes(topic, payload, true).await {
             warn!(%topic, what, error = %e, "failed to publish retained");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::DeviceRecord;
+    use rumqttc::{AsyncClient, MqttOptions};
+
+    fn mqtt_cfg() -> MqttConfig {
+        MqttConfig {
+            host: "x".into(),
+            port: 1883,
+            username: None,
+            password: None,
+            topic_prefix: "evmqtt".into(),
+            client_id_prefix: "test".into(),
+            keepalive_secs: 30,
+        }
+    }
+
+    fn hass_cfg() -> HassConfig {
+        HassConfig {
+            enabled: true,
+            discovery_prefix: "homeassistant".into(),
+            name: "evmqtt".into(),
+        }
+    }
+
+    fn fake_mqtt() -> MqttHandle {
+        // Eventloop is dropped: publishes accumulate in the bounded
+        // request channel, which is fine as long as tests stay well
+        // under capacity (100).
+        let (client, _eventloop) =
+            AsyncClient::new(MqttOptions::new("test", "127.0.0.1", 1883), 100);
+        MqttHandle::new(client)
+    }
+
+    fn rec(slug: &str, enabled: bool) -> DeviceRecord {
+        DeviceRecord {
+            slug: slug.to_string(),
+            name: "Test Device".to_string(),
+            unique_id: None,
+            bus: 0,
+            vendor: 0,
+            product: 0,
+            version: 0,
+            physical_path: None,
+            capability_fingerprint: None,
+            capability_tag: None,
+            enabled,
+            observed_keys: Vec::new(),
+        }
+    }
+
+    fn make_coord(initial: Vec<DeviceRecord>) -> (Coordinator, std::path::PathBuf) {
+        let tmp = std::env::temp_dir().join(format!(
+            "evmqtt-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let db = Database { devices: initial };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let coord = Coordinator::new(db, tmp.clone(), fake_mqtt(), mqtt_cfg(), hass_cfg(), tx);
+        (coord, tmp)
+    }
+
+    #[tokio::test]
+    async fn on_enable_is_idempotent_when_state_matches() {
+        // Echo absorption: HA's own publishes come back over the
+        // subscription, and a no-op must not rewrite the DB.
+        let (mut coord, db_path) = make_coord(vec![rec("kbd", true)]);
+        coord
+            .handle(CoordinatorMsg::EnableCommand {
+                slug: "kbd".into(),
+                on: true,
+            })
+            .await;
+        assert!(
+            !db_path.exists(),
+            "no-op enable must not persist the DB at {}",
+            db_path.display(),
+        );
+    }
+
+    #[tokio::test]
+    async fn on_enable_persists_when_state_changes() {
+        let (mut coord, db_path) = make_coord(vec![rec("kbd", false)]);
+        coord
+            .handle(CoordinatorMsg::EnableCommand {
+                slug: "kbd".into(),
+                on: true,
+            })
+            .await;
+        assert!(
+            db_path.exists(),
+            "real state change must persist the DB at {}",
+            db_path.display(),
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn empty_payload_on_enabled_topic_routes_to_remove() {
+        let (mut coord, db_path) = make_coord(vec![rec("kbd", false)]);
+        coord
+            .handle_mqtt(crate::mqtt::IncomingPublish {
+                topic: "evmqtt/_devices/kbd/enabled".to_string(),
+                payload: Vec::new(),
+                retain: true,
+            })
+            .await;
+        assert!(
+            coord.db.find("kbd").is_none(),
+            "remove must drop the record"
+        );
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn on_payload_routes_to_enable_command() {
+        let (mut coord, db_path) = make_coord(vec![rec("kbd", false)]);
+        coord
+            .handle_mqtt(crate::mqtt::IncomingPublish {
+                topic: "evmqtt/_devices/kbd/enabled".to_string(),
+                payload: PAYLOAD_ENABLED.as_bytes().to_vec(),
+                retain: true,
+            })
+            .await;
+        assert_eq!(coord.db.find("kbd").map(|r| r.enabled), Some(true));
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[tokio::test]
+    async fn unrecognised_payload_is_ignored() {
+        let (mut coord, db_path) = make_coord(vec![rec("kbd", false)]);
+        coord
+            .handle_mqtt(crate::mqtt::IncomingPublish {
+                topic: "evmqtt/_devices/kbd/enabled".to_string(),
+                payload: b"maybe".to_vec(),
+                retain: true,
+            })
+            .await;
+        assert_eq!(
+            coord.db.find("kbd").map(|r| r.enabled),
+            Some(false),
+            "bad payloads must not change state",
+        );
+        assert!(
+            !db_path.exists(),
+            "no-op must not persist the DB at {}",
+            db_path.display(),
+        );
     }
 }

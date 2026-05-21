@@ -280,6 +280,81 @@ pub async fn graceful_shutdown(
     abort.abort();
 }
 
-// Re-export under the old name for users who care; otherwise unused.
-#[allow(dead_code)]
-pub use rumqttc::ClientError;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rumqttc::{ConnectReturnCode, Packet, StateError};
+
+    #[test]
+    fn is_permanent_for_connection_refused() {
+        let e = ConnectionError::ConnectionRefused(ConnectReturnCode::BadUserNamePassword);
+        assert!(is_permanent(&e));
+    }
+
+    #[test]
+    fn is_permanent_for_not_connack() {
+        let e = ConnectionError::NotConnAck(Packet::PingResp);
+        assert!(is_permanent(&e));
+    }
+
+    #[test]
+    fn is_not_permanent_for_transient_errors() {
+        // A bare I/O error (e.g. "connection reset") is the canonical
+        // transient case: the broker is reachable but flaky, retrying
+        // is the right answer.
+        let e = ConnectionError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(!is_permanent(&e));
+        assert!(!is_permanent(&ConnectionError::NetworkTimeout));
+        assert!(!is_permanent(&ConnectionError::FlushTimeout));
+        assert!(!is_permanent(&ConnectionError::MqttState(
+            StateError::ConnectionAborted,
+        )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_ready_returns_immediately_when_already_connected() {
+        let (tx, rx) = watch::channel(ConnState::Connected);
+        let _keep = tx; // keep the sender alive for the duration of the await
+        wait_ready(rx, Duration::from_secs(10))
+            .await
+            .expect("Connected should resolve immediately");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_ready_returns_on_connected_transition() {
+        let (tx, rx) = watch::channel(ConnState::Connecting);
+        let join = tokio::spawn(wait_ready(rx, Duration::from_secs(10)));
+        // Yield so the task hits its first borrow and registers for changes.
+        tokio::task::yield_now().await;
+        tx.send(ConnState::Connected).unwrap();
+        join.await.unwrap().expect("Connected should resolve");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_ready_errors_on_permanent_failure() {
+        let (_tx, rx) = watch::channel(ConnState::PermanentFailure("bad creds".into()));
+        let err = wait_ready(rx, Duration::from_secs(10))
+            .await
+            .expect_err("PermanentFailure must fail");
+        assert!(err.to_string().contains("bad creds"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_ready_errors_on_timeout() {
+        let (_tx, rx) = watch::channel(ConnState::Connecting);
+        let err = wait_ready(rx, Duration::from_millis(50))
+            .await
+            .expect_err("timeout must fail");
+        assert!(err.to_string().contains("timed out"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_ready_errors_when_sender_dropped() {
+        let (tx, rx) = watch::channel(ConnState::Connecting);
+        let join = tokio::spawn(wait_ready(rx, Duration::from_secs(10)));
+        tokio::task::yield_now().await;
+        drop(tx);
+        let err = join.await.unwrap().expect_err("dropped sender must fail");
+        assert!(err.to_string().contains("terminated before connecting"));
+    }
+}

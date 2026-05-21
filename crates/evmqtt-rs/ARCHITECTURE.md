@@ -105,11 +105,19 @@ Channels:
 1. `daemon::run_with_shutdown` loads `Database` (missing file -> empty).
 2. `mqtt::spawn` creates the rumqttc client, spawns the eventloop task,
    returns `MqttRuntime`.
-3. Sleep ~200 ms so CONNECT lands, then publish retained
+3. `MqttRuntime::wait_ready(30 s)` blocks until the eventloop reports
+   `ConnState::Connected` (CONNACK received). It returns an error early
+   if the broker rejects the connect (`ConnectionRefused`, TLS handshake
+   failure, protocol mismatch) so the daemon doesn't sit in an infinite
+   retry loop on permanent errors; the 30 s budget is just generous
+   enough that a systemd service can come up before the network is
+   fully online without flapping. Once ready, publish retained
    `{prefix}/status = online`.
 4. Subscribe to `{prefix}/_devices/+/enabled`. Sleep ~300 ms so the
    broker has time to push retained `enabled` messages before the
-   watcher starts feeding `DeviceConnected` events.
+   watcher starts feeding `DeviceConnected` events. MQTT does not
+   expose a "retained delivery done" signal (SubAck only confirms the
+   subscription is registered), hence the flat sleep.
 5. Spawn the coordinator task. Its very first action is
    `republish_known()` -- info JSON, enabled mirror, HA discovery for
    every device in the DB, so disabled-but-known devices reappear
@@ -117,18 +125,35 @@ Channels:
 6. Spawn the watcher with a shutdown oneshot. It sweeps `/dev/input`
    once (manual directory walk + `evdev::Device::open`, not
    `evdev::enumerate()` which misbehaves in containers), then runs the
-   inotify loop.
-7. `info!("daemon ready")` and `shutdown.await`.
+   inotify loop. Every freshly-seen path goes through a 30 s open
+   retry: udev's chown and (in HA addons) the cgroup device controller
+   often haven't caught up by the time inotify fires, so the watcher
+   retries every second for up to 30 s before giving up.
+7. `info!("daemon ready")`. The daemon then `select!`s between the
+   externally-provided shutdown future and a `wait_for_permanent_failure`
+   that watches the same `ConnState` channel `wait_ready` used. A
+   post-startup permanent MQTT failure exits the daemon instead of
+   leaving it running in a dead-MQTT state.
 
 ### A new device arrives
 
 1. Watcher opens `/dev/input/eventN`, builds a `DeviceIdentity`, filters
    on `identity.has_keys`, sends `DeviceConnected(identity)`.
-2. Coordinator looks up the identity against `Database::match_identity`:
-   the on-disk `matcher` choice is implicit -- `DeviceRecord::matches`
-   prefers `unique_id`, then bus/vendor/product/version, then name.
-3. If not found, `Database::insert` allocates a slug (`slugify(name)`
-   with `-2`, `-3`... on collision) and persists.
+2. Coordinator looks up the identity with `Database::match_or_insert`,
+   which both finds the record (via `DeviceRecord::matches`) and
+   backfills any previously-absent capability_fingerprint /
+   capability_tag / unique_id / physical_path on a match. The match
+   itself runs three checks in order: bus/vendor/product/version must
+   be equal (hard requirement); if both sides carry a `unique_id`,
+   they must agree; if the stored record has a
+   `capability_fingerprint`, it must agree with the live one. Name is
+   never consulted -- the kernel-supplied name is a label, not an
+   identity.
+3. If nothing matched, the record is inserted: the slug is allocated
+   from the slugified name, with `-2`, `-3`, … appended on collision.
+   When the live device's `capability_tag` is non-`"other"` it is
+   folded into the slug seed (`logitech-receiver-mouse`) so a
+   multi-collection USB receiver yields informative slugs.
 4. New devices: publish info JSON + enabled=off mirror + HA discovery
    (with just the Enabled switch in `cmps`).
 5. Record the identity in `connected: HashMap<slug, DeviceIdentity>`.
@@ -171,14 +196,20 @@ Channels:
 
 ### Daemon shutdown
 
-1. `shutdown.await` resolves on SIGINT/SIGTERM.
+1. The outer `select!` resolves either on the injected shutdown future
+   (SIGINT/SIGTERM in production) or on
+   `wait_for_permanent_failure` -- an MQTT permanent failure observed
+   after startup exits the process the same way.
 2. Watcher oneshot is fired and awaited.
 3. `drop(coord_tx)` closes the coordinator command channel; the
    coordinator's `select!` falls through to the `else` branch and
    exits its loop. On the way out it aborts every live monitor.
-4. Publish retained `{prefix}/status = offline`.
-5. `mqtt::graceful_shutdown` flips the shutdown flag, sends DISCONNECT,
-   awaits the eventloop task with a 500 ms timeout, aborts as fallback.
+4. Publish retained `{prefix}/status = offline`, then sleep 200 ms so
+   the broker has a chance to flush that publish before we hang up.
+5. `mqtt::graceful_shutdown` flips the shutdown flag (so the
+   eventloop swallows the inevitable "Connection closed by peer
+   abruptly"), sends DISCONNECT, awaits the eventloop task with a
+   500 ms timeout, aborts as fallback.
 
 ### CLI verbs
 
@@ -203,9 +234,18 @@ retained. `shutdown` runs `graceful_shutdown`.
   the kernel device name does not re-slug. HA identifiers are derived
   from slug + topic prefix, so they survive renames too.
 * **Identity matching**: each `DeviceRecord` stores every id we
-  extracted from evdev. `matches()` derives an effective match function
-  per call by picking the most precise common signal, instead of
-  storing an explicit "matcher" choice on disk.
+  extracted from evdev (BVPV, unique_id, physical_path,
+  capability_fingerprint, capability_tag). `DeviceRecord::matches`
+  requires BVPV equality unconditionally, then disqualifies on a
+  disagreeing unique_id or capability_fingerprint when both sides
+  have one; an absent field on either side is treated as "no
+  information," not a mismatch. This keeps the matcher implicit on
+  disk (no "matcher choice" field) and lets a record persisted by an
+  older binary -- before capability_fingerprint existed -- still
+  match its live device on the first post-upgrade sighting.
+  `match_or_insert` then backfills the previously-absent fields, so
+  the record reaches a fully-populated steady state after one
+  sighting.
 * **Echo absorption**: the daemon receives back its own publishes on
   `_devices/+/enabled`. Handlers are idempotent (no-op when state
   already matches), so echoes don't loop.
@@ -252,12 +292,3 @@ shape is a flat sleep; a more robust version would subscribe, then
 read from `mqtt_incoming` until a short period of silence (the same
 trick `Client::list_devices` uses). Defer until it actually causes
 trouble.
-
-(The earlier 200 ms CONNACK-settle and the CLI's 200 ms-per-verb tax
-are gone -- both `Client::connect` and `daemon::run_with_shutdown`
-now block on `MqttRuntime::wait_ready`, which resolves the moment
-the eventloop sees `ConnAck` or returns an error if the broker sends
-ConnectionRefused / TLS handshake fails / the timeout elapses. The
-eventloop also stops retrying on those clearly-permanent errors --
-no more infinite 2 s-sleep loop when the broker is fundamentally
-saying "no".)

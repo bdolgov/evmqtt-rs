@@ -18,7 +18,7 @@ use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode};
 use evmqtt_rs::client::Client;
 use evmqtt_rs::config::{HassConfig, MqttConfig};
-use evmqtt_rs::daemon;
+use evmqtt_rs::{daemon, discovery};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use rumqttd::{Broker, Config as BrokerConfig, ConnectionSettings, RouterConfig, ServerSettings};
 use serde_json::Value;
@@ -368,6 +368,48 @@ fn require_uinput() {
              `cargo test -- --skip integration_test`.",
         );
     }
+    require_uinput_propagates_to_dev_input();
+}
+
+/// `/dev/uinput` being writable is necessary but not sufficient — on
+/// many setups the test process can register a uinput device but
+/// cannot see the resulting `/dev/input/eventN` node it creates. The
+/// daemon needs to read these nodes, so a test that can't see them
+/// would silently fail later in a much more confusing way. Catch it
+/// here with a clear diagnostic.
+fn require_uinput_propagates_to_dev_input() {
+    let snapshot = || -> std::collections::BTreeSet<PathBuf> {
+        discovery::list_event_paths().into_iter().collect()
+    };
+    let before = snapshot();
+    // A minimal uinput device with one key is enough to force the
+    // kernel to allocate a fresh `eventN`.
+    let mut keys = AttributeSet::<KeyCode>::new();
+    keys.insert(KeyCode::KEY_A);
+    let _probe = VirtualDevice::builder()
+        .expect("open /dev/uinput")
+        .name(b"evmqtt-rs propagation probe")
+        .input_id(InputId::new(BusType(0x06), 0xCAFE, 0xFACE, 0x0001))
+        .with_keys(&keys)
+        .expect("with_keys on probe device")
+        .build()
+        .expect("build probe uinput device");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if snapshot().difference(&before).next().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    panic!(
+        "uinput device created successfully, but no new node appeared \
+         under /dev/input within 10s. The test process probably can't \
+         see /dev/input -- check that the running user is in the `input` \
+         group (`sudo usermod -a -G input \"$USER\"`, then log out and back \
+         in), or skip this test with `cargo test -- --skip integration_test`.",
+    );
 }
 
 fn pick_free_port() -> u16 {
