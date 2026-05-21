@@ -1,0 +1,5 @@
+# HAOS App repository:
+# https://developers.home-assistant.io/docs/apps/repository.
+name: evmqtt-rs
+url: 'https://github.com/bdolgov/evmqtt-rs'
+maintainer: Boris Dolgov <boris@dolgov.name>

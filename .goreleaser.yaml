@@ -20,6 +20,20 @@ archives:
     name_template: >-
       {{ .ProjectName }}-{{ .Arch }}
 
+dockers_v2:
+  - id: evmqtt-rs
+    images:
+      - "ghcr.io/bdolgov/evmqtt-rs-haos"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - "linux/amd64"
+      - "linux/arm64"
+    dockerfile: haos_app/Dockerfile
+    extra_files:
+      - haos_app/run.sh
+
 changelog:
   sort: asc
   filters:

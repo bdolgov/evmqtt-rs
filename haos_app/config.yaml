@@ -1,0 +1,32 @@
+name: "evmqtt-rs"
+description: "evmqtt-rs turns keyboard key presses into MQTT messages."
+version: "0.1.0"
+slug: "evmqtt_rs"
+init: false
+url: "https://github.com/bdolgov/evmqtt-rs"
+hassio_api: true
+hassio_role: default
+arch:
+  - aarch64
+  - amd64
+udev: true
+devices:
+  - /dev/input/event0
+  - /dev/input/event1
+  - /dev/input/event2
+  - /dev/input/event3
+  - /dev/input/event4
+  - /dev/input/event5
+  - /dev/input/event6
+  - /dev/input/event7
+  - /dev/input/event8
+  - /dev/input/event9
+  - /dev/input/event10
+  - /dev/input/event11
+  - /dev/input/event12
+  - /dev/input/event13
+  - /dev/input/event14
+  - /dev/input/event15
+services:
+  - "mqtt:need"
+image: ghcr.io/bdolgov/evmqtt-rs-haos
