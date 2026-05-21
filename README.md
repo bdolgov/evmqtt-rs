@@ -14,7 +14,7 @@ of disk and 20 MiB of RAM.
   and announced to Home Assistant on first sighting.
 * Each detected device shows up in HA with an **Enabled** switch. Flip it on
   and `evmqtt-rs` starts grabbing events from that device; flip it off and
-  the device returns to the kernel. State survives restarts. and disconnects.
+  the device returns to the kernel. State survives restarts and disconnects.
 * Triggers are added to HA per-key, lazily — the first time you press a key
   on an enabled device, that key's `*_press` / `*_release` triggers appear
   in HA, ready to use in automations.
@@ -50,7 +50,7 @@ HA's MQTT integration listening — the discovery message is retained.
 
 Prerequisites: Linux machine with connected keyboard and an MQTT broker.
 
-1. Install the package for your OS and achitecture from
+1. Install the package for your OS and architecture from
    <https://github.com/bdolgov/evmqtt-rs/releases/latest>,
    or build the binary manually using `cargo build`.
 
@@ -84,7 +84,7 @@ Prerequisites: Linux machine with connected keyboard and an MQTT broker.
    ```
 
    Otherwise: configure your operating system to run `evmqtt-rs --daemon` with
-   environment varaibles set from `/etc/evmqtt-rs.env`, with access to
+   environment variables set from `/etc/evmqtt-rs.env`, with access to
    `/dev/input/*` devices, and with write access to `/var/lib/evmqtt-rs/`
    directory.
 
@@ -204,10 +204,19 @@ keeps it across restarts.
 The first one to appear gets the bare slug (`usb-keyboard`); the
 second gets `usb-keyboard-2`, the third `usb-keyboard-3`, and so
 on. Slugs are permanent: once assigned they don't change even if
-the device is renamed by the kernel later. The daemon's matching
-is based on the most precise identifier available, in order:
-`unique_id` (USB serial / Bluetooth MAC), bus/vendor/product/version
-quad, then exact name.
+the device is renamed by the kernel later.
+
+Matching a live device against the stored records always starts
+from the bus/vendor/product/version quad — that has to be an exact
+match before any other comparison runs. If both sides expose a
+`unique_id` (USB serial / Bluetooth MAC), it has to agree too; same
+for the device's capability fingerprint, a hash of the exposed
+event types and key/axis codes. The name is deliberately ignored,
+because the kernel-supplied name is a label, not an identity, and
+firmware revisions can change it. The capability fingerprint is
+what lets the four `eventN` nodes of a multi-collection USB
+receiver — same name, same BVPV, same phys — end up under distinct
+slugs.
 
 ### `/dev/input/event*` is "permission denied"
 
