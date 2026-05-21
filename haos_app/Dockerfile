@@ -2,13 +2,14 @@ FROM ghcr.io/home-assistant/base:latest
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG VERSION
 
 COPY haos_app/run.sh /
 COPY ${TARGETOS}/${TARGETARCH}/evmqtt-rs /
 
 
 LABEL \
-  io.hass.version="0.2.0" \
+  io.hass.version="${VERSION}" \
   io.hass.type="app" \
   io.hass.name="evmqtt-rs" \
   io.hass.description="Turns keyboard key presses into MQTT messages" \

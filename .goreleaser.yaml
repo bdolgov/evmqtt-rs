@@ -33,6 +33,8 @@ dockers_v2:
     dockerfile: haos_app/Dockerfile
     extra_files:
       - haos_app/run.sh
+    build_args:
+      VERSION: "{{ .Version }}"
 
 changelog:
   sort: asc
