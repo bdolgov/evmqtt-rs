@@ -42,8 +42,8 @@ async fn integration_test() {
     // 1. Connect two devices with distinct (vendor, product) so the
     //    daemon allocates two slugs without collision. Slug derivation
     //    lives in `slug::slugify` and is exercised by its own unit
-    //    tests; the names below slugify to "evmqtt-rs-e2e-a" and
-    //    "evmqtt-rs-e2e-b" -- both used as literal strings throughout
+    //    tests; the names below slugify to "evmqtt-rs-e2e-a-kbd" and
+    //    "evmqtt-rs-e2e-b-kbd" -- both used as literal strings throughout
     //    so a reader can grep for either.
     h.connect_device(0, "evmqtt-rs e2e A", 0xCAFE, 0xBABE);
     h.connect_device(1, "evmqtt-rs e2e B", 0xDEAD, 0xBEEF);
@@ -51,39 +51,39 @@ async fn integration_test() {
     // 2. Both devices are announced as retained info + retained
     //    enabled=off + retained HA discovery.
     let info_a_json: Value =
-        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a").await).unwrap();
+        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a-kbd").await).unwrap();
     let info_b_json: Value =
-        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b").await).unwrap();
-    assert_eq!(info_a_json["slug"], "evmqtt-rs-e2e-a");
-    assert_eq!(info_a_json["name"], "evmqtt-rs e2e A");
+        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b-kbd").await).unwrap();
+    assert_eq!(info_a_json["slug"], "evmqtt-rs-e2e-a-kbd");
+    assert_eq!(info_a_json["name"], "evmqtt-rs e2e A (kbd)");
     assert_eq!(info_a_json["vendor"], 0xCAFE);
     assert_eq!(info_a_json["product"], 0xBABE);
     assert!(
         info_a_json.get("observed_keys").is_none(),
         "info topic must not carry observed_keys",
     );
-    assert_eq!(info_b_json["slug"], "evmqtt-rs-e2e-b");
+    assert_eq!(info_b_json["slug"], "evmqtt-rs-e2e-b-kbd");
     assert_eq!(info_b_json["vendor"], 0xDEAD);
     assert_eq!(info_b_json["product"], 0xBEEF);
 
     assert_eq!(
-        h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a/enabled")
+        h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a-kbd/enabled")
             .await,
         "off"
     );
     assert_eq!(
-        h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b/enabled")
+        h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b-kbd/enabled")
             .await,
         "off"
     );
 
     let disc_a_json: Value = serde_json::from_str(
-        &h.wait_retained("homeassistant/device/evmqtt_evmqtt-rs-e2e-a/config")
+        &h.wait_retained("homeassistant/device/evmqtt_evmqtt-rs-e2e-a-kbd/config")
             .await,
     )
     .unwrap();
     let disc_b_json: Value = serde_json::from_str(
-        &h.wait_retained("homeassistant/device/evmqtt_evmqtt-rs-e2e-b/config")
+        &h.wait_retained("homeassistant/device/evmqtt_evmqtt-rs-e2e-b-kbd/config")
             .await,
     )
     .unwrap();
@@ -99,20 +99,20 @@ async fn integration_test() {
 
     // 3. Enable A only. The daemon mirrors "on" back and starts the
     //    monitor for A; B stays unmonitored.
-    h.enable("evmqtt-rs-e2e-a").await;
-    h.wait_for_publish("evmqtt/_devices/evmqtt-rs-e2e-a/enabled", |p| p == "on")
+    h.enable("evmqtt-rs-e2e-a-kbd").await;
+    h.wait_for_publish("evmqtt/_devices/evmqtt-rs-e2e-a-kbd/enabled", |p| p == "on")
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Press a key on A. Action publish lands; discovery republishes
     // with a_press / a_release components.
     h.send_key(0, KeyCode::KEY_A, true);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a/action", |p| p == "a_press")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a-kbd/action", |p| p == "a_press")
         .await;
     h.send_key(0, KeyCode::KEY_A, false);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a/action", |p| p == "a_release")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a-kbd/action", |p| p == "a_release")
         .await;
-    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-a/config", |p| {
+    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-a-kbd/config", |p| {
         p.contains("a_press") && p.contains("a_release")
     })
     .await;
@@ -123,7 +123,7 @@ async fn integration_test() {
     h.send_key(1, KeyCode::KEY_C, false);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
-        !h.has_seen("evmqtt/evmqtt-rs-e2e-b/action"),
+        !h.has_seen("evmqtt/evmqtt-rs-e2e-b-kbd/action"),
         "B is disabled; no action publishes should appear for it",
     );
 
@@ -133,38 +133,38 @@ async fn integration_test() {
     //    the daemon must match the new identity to the existing DB
     //    record and resume monitoring under the original slug. The
     //    next keypress on the *new* uinput instance must still appear
-    //    on `evmqtt/evmqtt-rs-e2e-a/action`, not on a freshly minted
+    //    on `evmqtt/evmqtt-rs-e2e-a-kbd/action`, not on a freshly minted
     //    slug.
     h.disconnect_device(0);
     tokio::time::sleep(Duration::from_millis(500)).await;
     h.connect_device(0, "evmqtt-rs e2e A", 0xCAFE, 0xBABE);
     tokio::time::sleep(Duration::from_millis(700)).await;
     h.send_key(0, KeyCode::KEY_D, true);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a/action", |p| p == "d_press")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a-kbd/action", |p| p == "d_press")
         .await;
     h.send_key(0, KeyCode::KEY_D, false);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a/action", |p| p == "d_release")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a-kbd/action", |p| p == "d_release")
         .await;
     // The reconnect must not have re-registered A as a brand new
     // device under a `-2` slug.
     assert!(
-        !h.has_seen("evmqtt/_devices/evmqtt-rs-e2e-a-2"),
+        !h.has_seen("evmqtt/_devices/evmqtt-rs-e2e-a-kbd-2"),
         "reconnect must reuse the existing slug, not allocate -2",
     );
 
     // 5. Enable B too. Now its key presses propagate independently.
-    h.enable("evmqtt-rs-e2e-b").await;
-    h.wait_for_publish("evmqtt/_devices/evmqtt-rs-e2e-b/enabled", |p| p == "on")
+    h.enable("evmqtt-rs-e2e-b-kbd").await;
+    h.wait_for_publish("evmqtt/_devices/evmqtt-rs-e2e-b-kbd/enabled", |p| p == "on")
         .await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     h.send_key(1, KeyCode::KEY_B, true);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-b/action", |p| p == "b_press")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-b-kbd/action", |p| p == "b_press")
         .await;
     h.send_key(1, KeyCode::KEY_B, false);
-    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-b/action", |p| p == "b_release")
+    h.wait_for_publish("evmqtt/evmqtt-rs-e2e-b-kbd/action", |p| p == "b_release")
         .await;
-    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-b/config", |p| {
+    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-b-kbd/config", |p| {
         p.contains("b_press") && p.contains("b_release")
     })
     .await;

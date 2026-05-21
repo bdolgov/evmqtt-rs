@@ -60,7 +60,7 @@ struct DiscoveryPayload<'a> {
 pub fn device_info_payload(record: &DeviceRecord) -> Vec<u8> {
     let mut v = json!({
         "slug": record.slug,
-        "name": record.name,
+        "name": record.display_name(),
         "bus": record.bus,
         "vendor": record.vendor,
         "product": record.product,
@@ -119,12 +119,13 @@ pub fn discovery_payload(record: &DeviceRecord, mqtt: &MqttConfig, hass: &HassCo
         }
     }
 
+    let display_name = record.display_name();
     let payload = DiscoveryPayload {
         dev: DeviceBlock {
             ids: vec![identifier],
-            name: format!("{} - {}", hass.name, record.name),
+            name: format!("{} - {}", hass.name, display_name),
             mf: MANUFACTURER,
-            mdl: format!("Input Device ({})", record.name),
+            mdl: format!("Input Device ({display_name})"),
             sw: env!("CARGO_PKG_VERSION"),
         },
         o: OriginBlock {
@@ -172,6 +173,9 @@ mod tests {
             vendor: 0x046d,
             product: 0xc52b,
             version: 0x0111,
+            physical_path: None,
+            capability_fingerprint: None,
+            capability_tag: None,
             enabled: false,
             observed_keys: keys,
         }

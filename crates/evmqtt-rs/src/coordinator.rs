@@ -1,5 +1,5 @@
 use crate::config::{HassConfig, MqttConfig};
-use crate::db::Database;
+use crate::db::{Database, MatchOutcome};
 use crate::discovery::DeviceIdentity;
 use crate::hass::{device_info_payload, discovery_payload};
 use crate::monitor::{self, MonitorHandle};
@@ -167,26 +167,29 @@ impl Coordinator {
 
     async fn on_connected(&mut self, id: DeviceIdentity) {
         // Find or create the record.
-        let slug = match self.db.match_identity(&id) {
-            Some(rec) => rec.slug.clone(),
-            None => {
-                let slug = self.db.insert(&id);
+        let (slug, freshly_inserted, persist) = match self.db.match_or_insert(&id) {
+            MatchOutcome::Matched { slug, backfilled } => (slug, false, backfilled),
+            MatchOutcome::Inserted { slug } => {
                 info!(
                     path = %id.path.display(),
                     name = %id.name,
                     slug = %slug,
                     "new device registered; disabled by default",
                 );
-                if let Err(e) = self.db.save_atomic(&self.db_path) {
-                    warn!(error = %e, "failed to persist DB after insert");
-                }
-                let rec = self.db.find(&slug).expect("just-inserted record").clone();
-                self.publish_info(&rec).await;
-                self.publish_enabled_mirror(&rec).await;
-                self.publish_discovery(&rec).await;
-                slug
+                (slug, true, true)
             }
         };
+        if persist
+            && let Err(e) = self.db.save_atomic(&self.db_path)
+        {
+            warn!(error = %e, "failed to persist DB after device sighting");
+        }
+        if freshly_inserted {
+            let rec = self.db.find(&slug).expect("just-inserted record").clone();
+            self.publish_info(&rec).await;
+            self.publish_enabled_mirror(&rec).await;
+            self.publish_discovery(&rec).await;
+        }
 
         if self.connected.contains_key(&slug) {
             debug!(%slug, "device already connected; ignoring duplicate sighting");

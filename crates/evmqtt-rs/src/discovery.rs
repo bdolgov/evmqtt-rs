@@ -1,10 +1,15 @@
-use evdev::{Device, EventType};
+use evdev::{Device, EventType, KeyCode, RelativeAxisCode};
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 use tracing::warn;
 
-/// Everything we know about an open input device. All fields come from
-/// evdev ioctls (EVIOCGNAME / EVIOCGUNIQ / EVIOCGID / EVIOCGPHYS) — the same
-/// kernel sources that populate `/sys/class/input/eventN/device/{name,uniq,id/*,phys}`.
+/// Everything we know about an open input device. The first batch of
+/// fields comes from evdev ioctls (EVIOCGNAME / EVIOCGUNIQ / EVIOCGID /
+/// EVIOCGPHYS) — the same kernel sources that populate
+/// `/sys/class/input/eventN/device/{name,uniq,id/*,phys}`. The
+/// capability fields are computed from the device's supported event
+/// types / codes and are how we tell apart the multiple `eventN` nodes
+/// of a single USB receiver that share name + BVPV + phys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceIdentity {
     pub path: PathBuf,
@@ -16,6 +21,18 @@ pub struct DeviceIdentity {
     pub version: u16,
     pub physical_path: Option<String>,
     pub has_keys: bool,
+    /// Stable hex hash of the device's exposed capabilities (event
+    /// types + key codes + REL/ABS axes). The same physical interface
+    /// — even moved between USB ports — produces the same value;
+    /// different sub-devices of a multi-collection HID receiver produce
+    /// different values.
+    pub capability_fingerprint: String,
+    /// Short human tag derived from capabilities (`kbd`, `numpad`,
+    /// `mouse`, `other`) used to disambiguate display names in HA when
+    /// a single USB receiver registers several otherwise-identically-
+    /// named records. Always set: devices that don't match any of the
+    /// known shapes fall through to `"other"`.
+    pub capability_tag: &'static str,
 }
 
 impl DeviceIdentity {
@@ -47,31 +64,28 @@ impl DeviceIdentity {
             version: id.version(),
             physical_path,
             has_keys,
+            capability_fingerprint: capability_fingerprint(device),
+            capability_tag: capability_tag(device),
         }
     }
 }
 
 /// Open a specific `/dev/input/event*` path and build a `DeviceIdentity`.
-pub fn open_identity(path: &Path) -> Option<DeviceIdentity> {
-    match Device::open(path) {
-        Ok(d) => Some(DeviceIdentity::from_open_device(path.to_path_buf(), &d)),
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "could not open device");
-            None
-        }
-    }
+/// Returns the underlying `io::Error` on failure so callers can decide
+/// whether to retry, warn, or stay quiet.
+pub fn try_open_identity(path: &Path) -> io::Result<DeviceIdentity> {
+    Device::open(path).map(|d| DeviceIdentity::from_open_device(path.to_path_buf(), &d))
 }
 
-/// Enumerate every visible `/dev/input/event*` device, in path order.
+/// List every visible `/dev/input/event*` node, in path order.
 ///
-/// We walk the directory by hand and open each `eventN` node directly
-/// rather than calling `evdev::enumerate()` -- the latter goes through
-/// helper crates whose udev/sysfs paths can return nothing inside
-/// containers even when `/dev/input/eventN` is bind-mounted and
-/// perfectly readable. A plain `read_dir` of `/dev/input` is the most
+/// We walk the directory by hand rather than calling `evdev::enumerate()` --
+/// the latter goes through helper crates whose udev/sysfs paths can return
+/// nothing inside containers even when `/dev/input/eventN` is bind-mounted
+/// and perfectly readable. A plain `read_dir` of `/dev/input` is the most
 /// reliable thing that works equally well on bare metal and in Docker.
-pub fn enumerate_identities() -> Vec<DeviceIdentity> {
-    let entries = match std::fs::read_dir(INPUT_DIR) {
+pub fn list_event_paths() -> Vec<PathBuf> {
+    let entries = match fs::read_dir(INPUT_DIR) {
         Ok(e) => e,
         Err(e) => {
             warn!(dir = INPUT_DIR, error = %e, "could not read input directory");
@@ -88,9 +102,6 @@ pub fn enumerate_identities() -> Vec<DeviceIdentity> {
     }
     paths.sort();
     paths
-        .into_iter()
-        .filter_map(|p| open_identity(&p))
-        .collect()
 }
 
 const INPUT_DIR: &str = "/dev/input";
@@ -101,6 +112,95 @@ const INPUT_DIR: &str = "/dev/input";
 pub fn is_event_node(name: &str) -> bool {
     name.strip_prefix("event")
         .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Compute a stable hex fingerprint of `device`'s capabilities.
+///
+/// Folds (sorted) supported event types, key codes, REL axes, and ABS
+/// axes into a single 64-bit FNV-1a hash. FNV-1a is used (rather than
+/// `std::hash::DefaultHasher`) because its algorithm is fully
+/// specified, so the digest stays stable across Rust releases and
+/// platforms — the value lands in the on-disk DB.
+pub fn capability_fingerprint(device: &Device) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce4_84222325;
+    const FNV_PRIME: u64 = 0x00000100_000001b3;
+
+    fn mix(hash: &mut u64, v: u16) {
+        for b in v.to_le_bytes() {
+            *hash ^= b as u64;
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+
+    let mut hash: u64 = FNV_OFFSET_BASIS;
+
+    // Section markers keep two sections with similar bit patterns from
+    // colliding (e.g. KEY_A and REL_X both have small numeric codes).
+    mix(&mut hash, 0xE001);
+    let mut types: Vec<u16> = device.supported_events().iter().map(|t| t.0).collect();
+    types.sort_unstable();
+    for t in types {
+        mix(&mut hash, t);
+    }
+
+    mix(&mut hash, 0xE002);
+    if let Some(keys) = device.supported_keys() {
+        let mut codes: Vec<u16> = keys.iter().map(|k| k.0).collect();
+        codes.sort_unstable();
+        for c in codes {
+            mix(&mut hash, c);
+        }
+    }
+
+    mix(&mut hash, 0xE003);
+    if let Some(rels) = device.supported_relative_axes() {
+        let mut codes: Vec<u16> = rels.iter().map(|r| r.0).collect();
+        codes.sort_unstable();
+        for c in codes {
+            mix(&mut hash, c);
+        }
+    }
+
+    mix(&mut hash, 0xE004);
+    if let Some(abss) = device.supported_absolute_axes() {
+        let mut codes: Vec<u16> = abss.iter().map(|a| a.0).collect();
+        codes.sort_unstable();
+        for c in codes {
+            mix(&mut hash, c);
+        }
+    }
+
+    format!("{hash:016x}")
+}
+
+/// Best-effort classification of a device into a short, human-readable
+/// tag. Used only to differentiate display names; matching is by
+/// fingerprint, not tag (two devices that classify to the same tag
+/// will still have distinct fingerprints).
+///
+/// The order is deliberate. A typing keyboard with extra media /
+/// power keys is still a keyboard, so `KEY_A` wins first. A device
+/// with only `KEY_KP*` (no letters) is a numpad. After that, REL_X/Y
+/// is the canonical mouse signature. Everything else (consumer-
+/// control collections, system-control collections, joysticks with
+/// no REL, ...) falls through to `"other"`; distinctness between
+/// them is preserved by the capability fingerprint, not by the tag.
+pub fn capability_tag(device: &Device) -> &'static str {
+    if let Some(keys) = device.supported_keys() {
+        if keys.contains(KeyCode::KEY_A) {
+            return "kbd";
+        }
+        if keys.contains(KeyCode::KEY_KP0) {
+            return "numpad";
+        }
+    }
+    if let Some(rels) = device.supported_relative_axes()
+        && rels.contains(RelativeAxisCode::REL_X)
+        && rels.contains(RelativeAxisCode::REL_Y)
+    {
+        return "mouse";
+    }
+    "other"
 }
 
 #[cfg(test)]
