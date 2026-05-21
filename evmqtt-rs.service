@@ -6,14 +6,16 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/evmqtt-rs -c /etc/evmqtt-rs.toml
+EnvironmentFile=/etc/evmqtt-rs.env
+ExecStart=/usr/local/bin/evmqtt-rs --daemon
 Restart=on-failure
 RestartSec=3
 # Don't run as root.
 DynamicUser=yes
 # Required to have access to input devices.
 SupplementaryGroups=input
-Environment=EVMQTT_LOG=info
+StateDirectory=evmqtt-rs
+Environment=EVMQTT_DB=/var/lib/evmqtt-rs/db.toml
 
 [Install]
 WantedBy=multi-user.target

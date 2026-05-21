@@ -1,394 +1,295 @@
-use crate::slug::slugify;
-use serde::Deserialize;
-use std::collections::HashSet;
-use std::path::Path;
-use thiserror::Error;
+use clap::Parser;
+use std::path::PathBuf;
 
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("failed to read config file {path}: {source}")]
-    Read {
-        path: String,
-        #[source]
-        source: std::io::Error,
+/// Top-level CLI / env-var surface.
+///
+/// Every connection parameter has a matching `EVMQTT_*` env var so the
+/// binary can be driven entirely from a systemd `EnvironmentFile=` (or
+/// `docker run -e ...`) without a config file on disk.
+#[derive(Debug, Parser)]
+#[command(
+    name = "evmqtt-rs",
+    version,
+    about = "Turns keyboard key presses into MQTT messages",
+    long_about = None,
+)]
+pub struct Args {
+    // ── MQTT ───────────────────────────────────────────────────────────
+    /// MQTT broker hostname or IP.
+    #[arg(long, env = "EVMQTT_MQTT_HOST")]
+    pub mqtt_host: String,
+
+    /// MQTT broker port.
+    #[arg(long, env = "EVMQTT_MQTT_PORT", default_value_t = 1883)]
+    pub mqtt_port: u16,
+
+    /// MQTT username (omit for anonymous brokers).
+    #[arg(long, env = "EVMQTT_MQTT_USERNAME")]
+    pub mqtt_username: Option<String>,
+
+    /// MQTT password.
+    #[arg(long, env = "EVMQTT_MQTT_PASSWORD")]
+    pub mqtt_password: Option<String>,
+
+    /// Topic prefix for every published topic.
+    #[arg(long, env = "EVMQTT_MQTT_TOPIC_PREFIX", default_value = "evmqtt")]
+    pub mqtt_topic_prefix: String,
+
+    /// Client-id prefix; the runtime appends `-<host>-<pid>`.
+    #[arg(
+        long,
+        env = "EVMQTT_MQTT_CLIENT_ID_PREFIX",
+        default_value = "evmqtt-rs"
+    )]
+    pub mqtt_client_id_prefix: String,
+
+    /// MQTT keepalive in seconds (clamped to 5).
+    #[arg(long, env = "EVMQTT_MQTT_KEEPALIVE_SECS", default_value_t = 30)]
+    pub mqtt_keepalive_secs: u16,
+
+    // ── Home Assistant ─────────────────────────────────────────────────
+    /// Publish HA discovery payloads when true.
+    #[arg(
+        long,
+        env = "EVMQTT_HASS_ENABLED",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+    )]
+    pub hass_enabled: bool,
+
+    /// HA MQTT discovery prefix.
+    #[arg(
+        long,
+        env = "EVMQTT_HASS_DISCOVERY_PREFIX",
+        default_value = "homeassistant"
+    )]
+    pub hass_discovery_prefix: String,
+
+    /// HA friendly-name prefix; the device name follows. When unset,
+    /// defaults to `mqtt-topic-prefix` so changing the topic prefix
+    /// also reflects in HA's UI without a second flag flip.
+    #[arg(long, env = "EVMQTT_HASS_NAME")]
+    pub hass_name: Option<String>,
+
+    // ── Local state ────────────────────────────────────────────────────
+    /// Path to the device database (TOML, atomically rewritten).
+    #[arg(long, env = "EVMQTT_DB", default_value = "/var/lib/evmqtt-rs/db.toml")]
+    pub db: PathBuf,
+
+    // ── Mode ───────────────────────────────────────────────────────────
+    /// Run the daemon: watch `/dev/input/event*` and bridge to MQTT.
+    #[arg(long, conflicts_with_all = ["list_devices", "enable_device", "disable_device", "remove_device"])]
+    pub daemon: bool,
+
+    /// List devices currently known to the running daemon (snapshot
+    /// from retained `_devices/+` topics).
+    #[arg(long, conflicts_with_all = ["daemon", "enable_device", "disable_device", "remove_device"])]
+    pub list_devices: bool,
+
+    /// Enable a device by slug. Repeat for multiple devices.
+    #[arg(long, value_name = "SLUG", conflicts_with_all = ["daemon", "list_devices"])]
+    pub enable_device: Vec<String>,
+
+    /// Disable a device by slug. Repeat for multiple devices.
+    #[arg(long, value_name = "SLUG", conflicts_with_all = ["daemon", "list_devices"])]
+    pub disable_device: Vec<String>,
+
+    /// Remove a device: drops the entry, clears retained MQTT topics
+    /// and HA discovery. Repeat for multiple devices.
+    #[arg(long, value_name = "SLUG", conflicts_with_all = ["daemon", "list_devices"])]
+    pub remove_device: Vec<String>,
+}
+
+/// What the user asked the binary to do.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    Daemon,
+    ListDevices,
+    /// Slugs to enable, then slugs to disable, then slugs to remove.
+    /// Any combination is allowed in one invocation.
+    Manage {
+        enable: Vec<String>,
+        disable: Vec<String>,
+        remove: Vec<String>,
     },
-    #[error("failed to parse config: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("invalid config: {0}")]
-    Invalid(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Config {
-    pub mqtt: MqttConfig,
-    #[serde(default)]
-    pub hass: HassConfig,
-    #[serde(default, rename = "device")]
-    pub devices: Vec<DeviceConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct MqttConfig {
     pub host: String,
-    #[serde(default = "default_mqtt_port")]
     pub port: u16,
-    #[serde(default)]
     pub username: Option<String>,
-    #[serde(default)]
     pub password: Option<String>,
-    /// Base of every published topic — `<topic_prefix>/<mqtt_path>/action`
+    /// Base of every published topic — `<topic_prefix>/<slug>/action`
     /// for events and `<topic_prefix>/status` for the LWT availability
-    /// topic. Belongs to MQTT because it's the gateway's prefix on the
-    /// broker side, independent of whether HA discovery is in use.
-    #[serde(default = "default_topic_prefix")]
+    /// topic.
     pub topic_prefix: String,
-    #[serde(default = "default_client_id_prefix")]
     pub client_id_prefix: String,
-    #[serde(default = "default_keepalive_secs")]
     pub keepalive_secs: u16,
 }
 
-fn default_mqtt_port() -> u16 {
-    1883
-}
-fn default_client_id_prefix() -> String {
-    "evmqtt-rs".into()
-}
-fn default_keepalive_secs() -> u16 {
-    30
-}
-fn default_topic_prefix() -> String {
-    "evmqtt".into()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone)]
 pub struct HassConfig {
-    /// When `false`, evmqtt-rs publishes action events but skips the
-    /// retained `homeassistant/device_automation/.../config` discovery
-    /// payloads — useful when you want a generic key→MQTT gateway
-    /// without HA wiring.
-    #[serde(default = "default_true")]
+    /// When `false`, action events still publish but retained discovery
+    /// payloads are suppressed.
     pub enabled: bool,
-    #[serde(default = "default_discovery_prefix")]
     pub discovery_prefix: String,
-    #[serde(default = "default_gateway_name")]
+    /// Prefixed to each device's HA friendly name.
     pub name: String,
 }
 
-impl Default for HassConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            discovery_prefix: default_discovery_prefix(),
-            name: default_gateway_name(),
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct Runtime {
+    pub mqtt: MqttConfig,
+    pub hass: HassConfig,
+    pub db_path: PathBuf,
+    pub mode: Mode,
 }
 
-fn default_discovery_prefix() -> String {
-    "homeassistant".into()
-}
-fn default_gateway_name() -> String {
-    "evmqtt".into()
-}
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeviceConfig {
-    pub matcher: DeviceMatcher,
-    pub name: String,
-    #[serde(default)]
-    pub mqtt_path: Option<String>,
-}
-
-impl DeviceConfig {
-    pub fn resolved_mqtt_path(&self) -> String {
-        self.mqtt_path
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| slugify(&self.name))
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
-pub enum DeviceMatcher {
-    UniqueId(String),
-    BusVendorProductVersion(u16, u16, u16, u16),
-    Name(String),
-}
-
-impl Config {
-    pub fn parse(s: &str) -> Result<Self, ConfigError> {
-        let cfg: Config = toml::from_str(s)?;
-        cfg.validate()?;
-        Ok(cfg)
-    }
-
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
-            path: path.display().to_string(),
-            source: e,
-        })?;
-        Self::parse(&text)
-    }
-
-    fn validate(&self) -> Result<(), ConfigError> {
-        if self.mqtt.host.trim().is_empty() {
-            return Err(ConfigError::Invalid("mqtt.host must not be empty".into()));
-        }
-        if self.mqtt.port == 0 {
-            return Err(ConfigError::Invalid("mqtt.port must be non-zero".into()));
-        }
-        if self.mqtt.topic_prefix.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "mqtt.topic_prefix must not be empty".into(),
-            ));
-        }
-        if self.hass.discovery_prefix.trim().is_empty() {
-            return Err(ConfigError::Invalid(
-                "hass.discovery_prefix must not be empty".into(),
-            ));
-        }
-        let mut seen_paths: HashSet<String> = HashSet::new();
-        for (i, d) in self.devices.iter().enumerate() {
-            if d.name.trim().is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "device[{i}].name must not be empty"
-                )));
+impl Args {
+    /// Pull the raw args apart into the daemon's runtime view.
+    ///
+    /// Returns `None` for `mode` when the user invoked the binary with
+    /// no subcommand and no `--daemon` flag — the caller should print
+    /// help in that case.
+    pub fn into_runtime(self) -> Result<Runtime, &'static str> {
+        let mode = if self.daemon {
+            Mode::Daemon
+        } else if self.list_devices {
+            Mode::ListDevices
+        } else if !self.enable_device.is_empty()
+            || !self.disable_device.is_empty()
+            || !self.remove_device.is_empty()
+        {
+            Mode::Manage {
+                enable: self.enable_device,
+                disable: self.disable_device,
+                remove: self.remove_device,
             }
-            let p = d.resolved_mqtt_path();
-            if p.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "device[{i}] (`{}`) resolves to an empty mqtt_path",
-                    d.name
-                )));
-            }
-            if !seen_paths.insert(p.clone()) {
-                return Err(ConfigError::Invalid(format!(
-                    "duplicate mqtt_path `{p}` across devices; set [[device]].mqtt_path explicitly",
-                )));
-            }
+        } else {
+            return Err("no mode selected: pass --daemon, --list-devices, \
+                 --enable-device, --disable-device, or --remove-device");
+        };
+
+        if self.mqtt_host.trim().is_empty() {
+            return Err("--mqtt-host / EVMQTT_MQTT_HOST must not be empty");
         }
-        Ok(())
+        if self.mqtt_port == 0 {
+            return Err("--mqtt-port must be non-zero");
+        }
+        if self.mqtt_topic_prefix.trim().is_empty() {
+            return Err("--mqtt-topic-prefix must not be empty");
+        }
+        if self.hass_discovery_prefix.trim().is_empty() {
+            return Err("--hass-discovery-prefix must not be empty");
+        }
+
+        let hass_name = self.hass_name.unwrap_or_else(|| self.mqtt_topic_prefix.clone());
+        Ok(Runtime {
+            mqtt: MqttConfig {
+                host: self.mqtt_host,
+                port: self.mqtt_port,
+                username: self.mqtt_username,
+                password: self.mqtt_password,
+                topic_prefix: self.mqtt_topic_prefix,
+                client_id_prefix: self.mqtt_client_id_prefix,
+                keepalive_secs: self.mqtt_keepalive_secs,
+            },
+            hass: HassConfig {
+                enabled: self.hass_enabled,
+                discovery_prefix: self.hass_discovery_prefix,
+                name: hass_name,
+            },
+            db_path: self.db,
+            mode,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
-    fn parses_minimal_config() {
-        let toml = r#"
-[mqtt]
-host = "192.168.1.10"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert_eq!(cfg.mqtt.host, "192.168.1.10");
-        assert_eq!(cfg.mqtt.port, 1883);
-        assert_eq!(cfg.mqtt.topic_prefix, "evmqtt");
-        assert_eq!(cfg.hass.discovery_prefix, "homeassistant");
-        assert!(cfg.hass.enabled);
-        assert!(cfg.devices.is_empty());
+    fn clap_definition_is_well_formed() {
+        // Catches conflict_with mis-typings and other compile-time-ish errors.
+        Args::command().debug_assert();
+    }
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once(&"evmqtt-rs").chain(args.iter())).expect("parse")
     }
 
     #[test]
-    fn parses_hass_disabled() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[hass]
-enabled = false
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert!(!cfg.hass.enabled);
+    fn parses_minimal_daemon_invocation() {
+        let args = parse(&["--daemon", "--mqtt-host", "broker"]);
+        let rt = args.into_runtime().expect("runtime");
+        assert!(matches!(rt.mode, Mode::Daemon));
+        assert_eq!(rt.mqtt.host, "broker");
+        assert_eq!(rt.mqtt.port, 1883);
+        assert_eq!(rt.mqtt.topic_prefix, "evmqtt");
+        assert_eq!(rt.hass.discovery_prefix, "homeassistant");
+        assert!(rt.hass.enabled);
     }
 
     #[test]
-    fn parses_topic_prefix_under_mqtt() {
-        let toml = r#"
-[mqtt]
-host = "x"
-topic_prefix = "kbd"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert_eq!(cfg.mqtt.topic_prefix, "kbd");
+    fn parses_list_devices() {
+        let args = parse(&["--list-devices", "--mqtt-host", "broker"]);
+        let rt = args.into_runtime().expect("runtime");
+        assert!(matches!(rt.mode, Mode::ListDevices));
     }
 
     #[test]
-    fn parses_unique_id_matcher() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher = { unique_id = "abc-123" }
-name    = "Living Room"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert_eq!(cfg.devices.len(), 1);
-        assert_eq!(
-            cfg.devices[0].matcher,
-            DeviceMatcher::UniqueId("abc-123".into())
-        );
-        assert_eq!(cfg.devices[0].resolved_mqtt_path(), "living-room");
+    fn parses_management_verbs() {
+        let args = parse(&[
+            "--mqtt-host",
+            "broker",
+            "--enable-device",
+            "a",
+            "--enable-device",
+            "b",
+            "--disable-device",
+            "c",
+            "--remove-device",
+            "d",
+        ]);
+        let rt = args.into_runtime().expect("runtime");
+        match rt.mode {
+            Mode::Manage {
+                enable,
+                disable,
+                remove,
+            } => {
+                assert_eq!(enable, vec!["a", "b"]);
+                assert_eq!(disable, vec!["c"]);
+                assert_eq!(remove, vec!["d"]);
+            }
+            other => panic!("expected Manage, got {other:?}"),
+        }
     }
 
     #[test]
-    fn parses_bvp_matcher_with_hex_literals() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher = { bus_vendor_product_version = [0x0003, 0x046d, 0xc52b, 0x0111] }
-name    = "Backup Remote"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert_eq!(
-            cfg.devices[0].matcher,
-            DeviceMatcher::BusVendorProductVersion(0x0003, 0x046d, 0xc52b, 0x0111)
-        );
+    fn rejects_no_mode() {
+        let args = parse(&["--mqtt-host", "broker"]);
+        assert!(args.into_runtime().is_err());
     }
 
     #[test]
-    fn parses_name_matcher_and_explicit_mqtt_path() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher   = { name = "USB Keyboard" }
-name      = "Office Keyboard"
-mqtt_path = "office-kbd"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert_eq!(
-            cfg.devices[0].matcher,
-            DeviceMatcher::Name("USB Keyboard".into())
-        );
-        assert_eq!(cfg.devices[0].resolved_mqtt_path(), "office-kbd");
+    fn rejects_conflicting_modes() {
+        let res = Args::try_parse_from([
+            "evmqtt-rs",
+            "--daemon",
+            "--list-devices",
+            "--mqtt-host",
+            "b",
+        ]);
+        assert!(res.is_err(), "--daemon and --list-devices must conflict");
     }
 
     #[test]
     fn rejects_empty_host() {
-        let toml = r#"
-[mqtt]
-host = ""
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn rejects_zero_port() {
-        let toml = r#"
-[mqtt]
-host = "x"
-port = 0
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn rejects_duplicate_mqtt_path() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher = { unique_id = "a" }
-name    = "Remote"
-
-[[device]]
-matcher = { unique_id = "b" }
-name    = "Remote"
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn rejects_empty_name() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher = { unique_id = "a" }
-name    = ""
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Invalid(_))));
-    }
-
-    #[test]
-    fn rejects_unknown_top_level_field() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[unknown_section]
-foo = "bar"
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_unknown_mqtt_field() {
-        let toml = r#"
-[mqtt]
-host = "x"
-typo_field = "oops"
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_unknown_hass_field() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[hass]
-# `topic_prefix` used to live here; it's now under [mqtt]. A stale
-# config with it set in [hass] should fail loudly rather than silently
-# losing the override.
-topic_prefix = "old-place"
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Parse(_))));
-    }
-
-    #[test]
-    fn rejects_unknown_device_field() {
-        let toml = r#"
-[mqtt]
-host = "x"
-
-[[device]]
-matcher = { unique_id = "a" }
-name    = "Remote"
-typo    = "oops"
-"#;
-        assert!(matches!(Config::parse(toml), Err(ConfigError::Parse(_))));
-    }
-
-    #[test]
-    fn accepts_empty_device_list() {
-        // Empty [[device]] list is valid; app.rs uses it to trigger detect-and-exit.
-        let toml = r#"
-[mqtt]
-host = "x"
-"#;
-        let cfg = Config::parse(toml).unwrap();
-        assert!(cfg.devices.is_empty());
+        let args = parse(&["--daemon", "--mqtt-host", "   "]);
+        assert!(args.into_runtime().is_err());
     }
 }

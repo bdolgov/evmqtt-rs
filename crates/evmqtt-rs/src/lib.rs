@@ -1,6 +1,11 @@
-pub mod app;
+pub mod cli;
+pub mod daemon;
+pub mod client;
 pub mod config;
+pub mod coordinator;
+pub mod db;
 pub mod discovery;
+pub mod hass;
 pub mod monitor;
 pub mod mqtt;
 pub mod slug;

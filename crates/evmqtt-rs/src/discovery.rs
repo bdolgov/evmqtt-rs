@@ -1,6 +1,4 @@
-use crate::config::DeviceMatcher;
 use evdev::{Device, EventType};
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
@@ -51,33 +49,6 @@ impl DeviceIdentity {
             has_keys,
         }
     }
-
-    pub fn matches(&self, m: &DeviceMatcher) -> bool {
-        match m {
-            DeviceMatcher::UniqueId(s) => self.unique_id.as_deref() == Some(s.as_str()),
-            DeviceMatcher::BusVendorProductVersion(b, v, p, ver) => {
-                self.bus == *b && self.vendor == *v && self.product == *p && self.version == *ver
-            }
-            DeviceMatcher::Name(s) => self.name == *s,
-        }
-    }
-
-    /// Pick the most precise matcher this identity supports.
-    /// Order: UniqueId (if non-empty) → BusVendorProductVersion → Name.
-    pub fn suggest_matcher(&self) -> DeviceMatcher {
-        if let Some(uniq) = self.unique_id.as_ref() {
-            return DeviceMatcher::UniqueId(uniq.clone());
-        }
-        if self.vendor != 0 || self.product != 0 {
-            return DeviceMatcher::BusVendorProductVersion(
-                self.bus,
-                self.vendor,
-                self.product,
-                self.version,
-            );
-        }
-        DeviceMatcher::Name(self.name.clone())
-    }
 }
 
 /// Open a specific `/dev/input/event*` path and build a `DeviceIdentity`.
@@ -91,164 +62,63 @@ pub fn open_identity(path: &Path) -> Option<DeviceIdentity> {
     }
 }
 
-/// Enumerate every visible input device.
+/// Enumerate every visible `/dev/input/event*` device, in path order.
+///
+/// We walk the directory by hand and open each `eventN` node directly
+/// rather than calling `evdev::enumerate()` -- the latter goes through
+/// helper crates whose udev/sysfs paths can return nothing inside
+/// containers even when `/dev/input/eventN` is bind-mounted and
+/// perfectly readable. A plain `read_dir` of `/dev/input` is the most
+/// reliable thing that works equally well on bare metal and in Docker.
 pub fn enumerate_identities() -> Vec<DeviceIdentity> {
-    let mut out: Vec<DeviceIdentity> = evdev::enumerate()
-        .map(|(path, device)| DeviceIdentity::from_open_device(path, &device))
-        .collect();
-    out.sort_by(|a, b| a.path.cmp(&b.path));
-    out
+    let entries = match std::fs::read_dir(INPUT_DIR) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(dir = INPUT_DIR, error = %e, "could not read input directory");
+            return Vec::new();
+        }
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(s) = name.to_str() else { continue };
+        if is_event_node(s) {
+            paths.push(entry.path());
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| open_identity(&p))
+        .collect()
 }
 
-/// Write a TOML `[[device]]` snippet for each visible input device, using
-/// the most precise matcher each device supports. Intended for human users
-/// to paste into their config.
-pub fn write_detect_snippets<W: Write>(out: &mut W) -> io::Result<usize> {
-    let identities = enumerate_identities();
-    if identities.is_empty() {
-        writeln!(
-            out,
-            "# no input devices visible (check group membership / permissions on /dev/input)"
-        )?;
-        return Ok(0);
-    }
-    for (i, id) in identities.iter().enumerate() {
-        if i > 0 {
-            writeln!(out)?;
-        }
-        write_one_snippet(out, id)?;
-    }
-    Ok(identities.len())
-}
+const INPUT_DIR: &str = "/dev/input";
 
-fn write_one_snippet<W: Write>(out: &mut W, id: &DeviceIdentity) -> io::Result<()> {
-    writeln!(
-        out,
-        "# {}  ({})  has_keys={}",
-        id.name,
-        id.path.display(),
-        if id.has_keys { "yes" } else { "no" },
-    )?;
-    writeln!(out, "[[device]]")?;
-    match id.suggest_matcher() {
-        DeviceMatcher::UniqueId(s) => {
-            writeln!(out, "matcher = {{ unique_id = {} }}", toml_string(&s))?;
-        }
-        DeviceMatcher::BusVendorProductVersion(b, v, p, ver) => {
-            writeln!(
-                out,
-                "matcher = {{ bus_vendor_product_version = [0x{b:04x}, 0x{v:04x}, 0x{p:04x}, 0x{ver:04x}] }}",
-            )?;
-        }
-        DeviceMatcher::Name(s) => {
-            writeln!(out, "matcher = {{ name = {} }}", toml_string(&s))?;
-        }
-    }
-    writeln!(out, "name    = {}", toml_string(&id.name))?;
-    writeln!(
-        out,
-        "# mqtt_path = {}",
-        toml_string(&crate::slug::slugify(&id.name))
-    )?;
-    Ok(())
-}
-
-/// Render a string as a TOML basic string literal.
-fn toml_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+/// True iff `name` looks like an `eventN` node where N is one or more
+/// ASCII digits. Public so the inotify watcher in `watcher.rs` can
+/// share the same definition.
+pub fn is_event_node(name: &str) -> bool {
+    name.strip_prefix("event")
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn id_with(
-        name: &str,
-        unique_id: Option<&str>,
-        bus: u16,
-        vendor: u16,
-        product: u16,
-        version: u16,
-    ) -> DeviceIdentity {
-        DeviceIdentity {
-            path: PathBuf::from("/dev/input/event0"),
-            name: name.to_string(),
-            unique_id: unique_id.map(|s| s.to_string()),
-            bus,
-            vendor,
-            product,
-            version,
-            physical_path: None,
-            has_keys: true,
-        }
+    #[test]
+    fn is_event_node_accepts_event_digits() {
+        assert!(is_event_node("event0"));
+        assert!(is_event_node("event42"));
     }
 
     #[test]
-    fn matches_unique_id_exactly() {
-        let id = id_with("USB Keyboard", Some("abc"), 3, 0x046d, 0xc52b, 0x0111);
-        assert!(id.matches(&DeviceMatcher::UniqueId("abc".into())));
-        assert!(!id.matches(&DeviceMatcher::UniqueId("xyz".into())));
-    }
-
-    #[test]
-    fn matches_bvp_quad() {
-        let id = id_with("USB Keyboard", None, 0x0003, 0x046d, 0xc52b, 0x0111);
-        assert!(id.matches(&DeviceMatcher::BusVendorProductVersion(
-            0x0003, 0x046d, 0xc52b, 0x0111
-        )));
-        assert!(!id.matches(&DeviceMatcher::BusVendorProductVersion(
-            0x0003, 0x046d, 0xc52b, 0x0000
-        )));
-    }
-
-    #[test]
-    fn matches_name_exact_case_sensitive() {
-        let id = id_with("USB Keyboard", None, 0, 0, 0, 0);
-        assert!(id.matches(&DeviceMatcher::Name("USB Keyboard".into())));
-        assert!(!id.matches(&DeviceMatcher::Name("usb keyboard".into())));
-    }
-
-    #[test]
-    fn suggest_prefers_unique_id() {
-        let id = id_with("USB Keyboard", Some("abc"), 3, 0x046d, 0xc52b, 0x0111);
-        assert_eq!(id.suggest_matcher(), DeviceMatcher::UniqueId("abc".into()));
-    }
-
-    #[test]
-    fn suggest_falls_back_to_bvp() {
-        let id = id_with("USB Keyboard", None, 0x0003, 0x046d, 0xc52b, 0x0111);
-        assert_eq!(
-            id.suggest_matcher(),
-            DeviceMatcher::BusVendorProductVersion(0x0003, 0x046d, 0xc52b, 0x0111)
-        );
-    }
-
-    #[test]
-    fn suggest_falls_back_to_name() {
-        let id = id_with("Custom GPIO", None, 0, 0, 0, 0);
-        assert_eq!(
-            id.suggest_matcher(),
-            DeviceMatcher::Name("Custom GPIO".into())
-        );
-    }
-
-    #[test]
-    fn toml_string_escapes_quotes_and_backslashes() {
-        assert_eq!(toml_string("simple"), r#""simple""#);
-        assert_eq!(toml_string(r#"a"b\c"#), r#""a\"b\\c""#);
+    fn is_event_node_rejects_others() {
+        assert!(!is_event_node("event"));
+        assert!(!is_event_node("eventX"));
+        assert!(!is_event_node("mice"));
+        assert!(!is_event_node("js0"));
+        assert!(!is_event_node("by-id"));
     }
 }

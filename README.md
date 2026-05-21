@@ -8,6 +8,17 @@ supports any input device recognized by Linux (wired keyboards, Bluetooth
 keyboards, ...), integrates with Home Assistant over MQTT, and needs only 5 MiB
 of disk and 20 MiB of RAM.
 
+## Highlights
+
+* No static device list — every `/dev/input/event*` keyboard is auto-detected
+  and announced to Home Assistant on first sighting.
+* Each detected device shows up in HA with an **Enabled** switch. Flip it on
+  and `evmqtt-rs` starts grabbing events from that device; flip it off and
+  the device returns to the kernel. State survives restarts.
+* Triggers are added to HA per-key, lazily — the first time you press a key
+  on an enabled device, that key's `*_press` / `*_release` triggers appear
+  in HA, ready to use in automations.
+
 ## Installation
 
 Prerequisites: Linux machine with connected keyboard, [Rust toolchain], and an
@@ -15,9 +26,7 @@ MQTT broker.
 
 [Rust toolchain]: https://rustup.rs
 
-1. Compile and install the binary:
-
-   TODO: Replace with `cargo binstall` or something like that.
+1. Build and install the binary:
 
    ```bash
    git clone https://github.com/bdolgov/evmqtt-rs.git
@@ -26,29 +35,24 @@ MQTT broker.
    sudo install -m 755 target/release/evmqtt-rs /usr/local/bin/evmqtt-rs
    ```
 
-2. Configure MQTT:
+2. Write the environment file with your MQTT credentials. The same file is
+   used by the systemd service **and** sourced from the shell when you run
+   management commands by hand.
 
    ```bash
-   cat <<EOF | sudo tee /etc/evmqtt-rs.toml
-   [mqtt]
-   host = "192.168.1.10"
-   port = 1883
-   username = "mqtt_user"     # Or remove if the broker doesn't authenticate.
-   password = "mqtt_password"
-
+   sudo install -m 600 /dev/stdin /etc/evmqtt-rs.env <<'EOF'
+   EVMQTT_MQTT_HOST=192.168.1.10
+   EVMQTT_MQTT_PORT=1883
+   EVMQTT_MQTT_USERNAME=mqtt_user
+   EVMQTT_MQTT_PASSWORD=mqtt_password
+   # Optional overrides:
+   # EVMQTT_MQTT_TOPIC_PREFIX=evmqtt
+   # EVMQTT_HASS_DISCOVERY_PREFIX=homeassistant
+   # EVMQTT_LOG=info
    EOF
    ```
 
-3. Put all connected input devices into the config:
-
-   ```bash
-   sudo evmqtt-rs --detect |& sudo tee -a /etc/evmqtt-rs.toml
-   ```
-
-   If some input devices need to stay attached to the OS instead of MQTT,
-   remove them from the config.
-
-4. Configure `systemd` service:
+3. Install and start the systemd service:
 
    ```bash
    sudo install -m 644 evmqtt-rs.service /etc/systemd/system/evmqtt-rs.service
@@ -56,11 +60,30 @@ MQTT broker.
    sudo systemctl enable --now evmqtt-rs.service
    ```
 
-   (Or write a similar config for your init system if you are not using
-   systemd.)
+   (Or write a similar unit for your init system if you are not using
+   systemd. The daemon needs `--daemon`, an `input`-group identity for
+   `/dev/input/event*` access, and a writable state directory for
+   `db.toml` — pointed at by `EVMQTT_DB`.)
 
-5. Press some keys, observe messages in MQTT and devices in Home Assistant.
-   If something is wrong, check the logs:
+4. Enable a device. Either flip its "Enabled" switch in Home Assistant, or
+   run the CLI by hand:
+
+   ```bash
+   # /etc/evmqtt-rs.env is root-owned, so read it through sudo and let
+   # `set -a` export every variable defined inside.
+   set -a && eval "$(sudo cat /etc/evmqtt-rs.env)" && set +a
+
+   evmqtt-rs --list-devices
+   ╭──────────────────────────────┬─────────┬──────────────────────────────┬───────────┬────────┬────────┬─────────┬─────────╮
+   │ slug                         │ enabled │ name                         │ unique_id │ bus    │ vendor │ product │ version │
+   ├──────────────────────────────┼─────────┼──────────────────────────────┼───────────┼────────┼────────┼─────────┼─────────┤
+   │ at-translated-set-2-keyboard │ off     │ AT Translated Set 2 keyboard │ -         │ 0x0011 │ 0x0001 │ 0x0001  │ 0xab00  │
+   ╰──────────────────────────────┴─────────┴──────────────────────────────┴───────────┴────────┴────────┴─────────┴─────────╯
+   evmqtt-rs --enable-device at-translated-set-2-keyboard
+   ```
+
+5. Press some keys, watch triggers appear in MQTT and Home Assistant. If
+   something is wrong:
 
    ```bash
    sudo journalctl -fu evmqtt-rs.service
@@ -68,158 +91,188 @@ MQTT broker.
 
 ## Home Assistant Integration
 
-`evmqtt-rs` uses Home Assistant [MQTT discovery] to automatically create one
-Home Assistant MQTT device for every configured input device.
+`evmqtt-rs` uses Home Assistant [device-based MQTT discovery]: one retained
+config message per device, at `<discovery_prefix>/device/<id>/config`. Every
+detected device gets:
 
-Every device gets two [MQTT Device Trigger]s:
+* An **Enabled** switch component, wired to the daemon's enable/disable
+  control topic. Flipping the switch in HA enables or disables monitoring
+  for that device.
+* One [MQTT Device Trigger] pair (`*_press` and `*_release`) for every key
+  the daemon has ever observed on that device. The discovery payload is
+  re-published whenever a new key arrives.
 
-* `{key}` pressed: when the key is pressed.
-* `{key}` released: when the key is released.
+Triggers only appear after a key has been pressed at least once with the
+device enabled. If you want them pre-populated, press each key once with
+HA's MQTT integration listening — the discovery message is retained.
 
-These triggers can be referenced from Home Assistant automation rules.
-
-[MQTT discovery]: https://www.home-assistant.io/integrations/mqtt/#mqtt-discovery
+[device-based MQTT discovery]: https://www.home-assistant.io/integrations/mqtt/#device-based-discovery
 [MQTT Device Trigger]: https://www.home-assistant.io/integrations/device_trigger.mqtt/
 
 ## MQTT Topic Structure
 
-The topic structure resembles the topic structure that [Zigbee2MQTT] uses for
-remote controllers.
+| Topic                                            | Direction        | Notes                                                |
+| ------------------------------------------------ | -----------------| ---------------------------------------------------- |
+| `<topic_prefix>/status`                          | evmqtt → broker  | `online` / `offline` (LWT)                           |
+| `<topic_prefix>/_devices/<slug>`                 | evmqtt → broker  | Retained JSON describing the device                  |
+| `<topic_prefix>/_devices/<slug>/enabled`         | both directions  | Retained `on` / `off`. Write to control the daemon   |
+| `<topic_prefix>/<slug>/action`                   | evmqtt → broker  | `<key>_press` / `<key>_release` events               |
+| `<discovery_prefix>/device/<id>/config`          | evmqtt → broker  | HA device-based discovery payload                    |
 
-* `<topic_prefix>/status`: `online` or `offline`, depending on whether `evmqtt-rs` is running.
-* `<topic_prefix>/<mqtt_path>/action`: `<key>_press` or `<key>_release`.
+`<slug>` is the daemon-assigned id (slugified name with `-2`, `-3`, … on
+collision); `<id>` is `<topic_prefix>_<slug>`.
 
-Where:
+Writing an empty retained message to `<topic_prefix>/_devices/<slug>/enabled`
+is interpreted by the running daemon as a remove command (see
+`--remove-device` below) — it drops the device from the database and clears
+the retained topics.
 
-* `<topic_prefix>` is the topic prefix from the configuration; defaults to `evmqtt` if unspecified.
-* `<mqtt_path>` is the device-specific subtopic name from the configuration; defaults to the slugified name of the device if unspecified.
-* `<key>` is the identifier of the pressed or released key.
+## Configuration
 
-[Zigbee2MQTT]: https://www.zigbee2mqtt.io/
+All settings are flags. Each flag has a matching `EVMQTT_*` environment
+variable so the daemon can be driven entirely from a systemd
+`EnvironmentFile=` (or `docker run -e ...`) without a config file.
 
-## Configuration reference
+### MQTT (`EVMQTT_MQTT_*`)
 
-### `[mqtt]`
+| Flag                        | Env                              | Default       |
+| --------------------------- | -------------------------------- | ------------- |
+| `--mqtt-host`               | `EVMQTT_MQTT_HOST`               | **required**  |
+| `--mqtt-port`               | `EVMQTT_MQTT_PORT`               | `1883`        |
+| `--mqtt-username`           | `EVMQTT_MQTT_USERNAME`           | none          |
+| `--mqtt-password`           | `EVMQTT_MQTT_PASSWORD`           | none          |
+| `--mqtt-topic-prefix`       | `EVMQTT_MQTT_TOPIC_PREFIX`       | `evmqtt`      |
+| `--mqtt-client-id-prefix`   | `EVMQTT_MQTT_CLIENT_ID_PREFIX`   | `evmqtt-rs`   |
+| `--mqtt-keepalive-secs`     | `EVMQTT_MQTT_KEEPALIVE_SECS`     | `30`          |
 
-| Field              | Type   | Default       | Notes                                                                                           |
-| ------------------ | ------ | ------------- | ----------------------------------------------------------------------------------------------- |
-| `host`             | string | **required**  | Broker hostname or IP                                                                           |
-| `port`             | u16    | `1883`        |                                                                                                 |
-| `username`         | string | none          | Omit (or both creds) for anonymous brokers                                                      |
-| `password`         | string | none          |                                                                                                 |
-| `topic_prefix`     | string | `"evmqtt"`    | Base of every published topic — `<topic_prefix>/<mqtt_path>/action` and `<topic_prefix>/status` |
-| `client_id_prefix` | string | `"evmqtt-rs"` | The runtime appends `-<hostname>-<pid>` so every restart joins as a fresh client                |
-| `keepalive_secs`   | u16    | `30`          | Clamped to a 5 s minimum                                                                        |
+### Home Assistant (`EVMQTT_HASS_*`)
 
-### `[hass]`
+| Flag                        | Env                              | Default          |
+| --------------------------- | -------------------------------- | ---------------- |
+| `--hass-enabled`            | `EVMQTT_HASS_ENABLED`            | `true`           |
+| `--hass-discovery-prefix`   | `EVMQTT_HASS_DISCOVERY_PREFIX`   | `homeassistant`  |
+| `--hass-name`               | `EVMQTT_HASS_NAME`               | same as `--mqtt-topic-prefix` |
 
-| Field              | Type   | Default           | Notes                                                                                       |
-| ------------------ | ------ | ----------------- | ------------------------------------------------------------------------------------------- |
-| `enabled`          | bool   | `true`            | When `false`, action events still publish but retained HA discovery payloads are suppressed |
-| `discovery_prefix` | string | `"homeassistant"` | Must match HA's MQTT integration discovery prefix                                           |
-| `name`             | string | `"evmqtt"`        | Prepended to each device's HA friendly name                                                 |
+### Local state
 
-### `[[device]]`
+| Flag           | Env             | Default                          |
+| -------------- | --------------- | -------------------------------- |
+| `--db PATH`    | `EVMQTT_DB`     | `/var/lib/evmqtt-rs/db.toml`     |
 
-One entry per physical input device. Repeatable.
+### Modes
 
-| Field       | Type         | Default         | Notes                                                                   |
-| ----------- | ------------ | --------------- | ----------------------------------------------------------------------- |
-| `matcher`   | inline table | **required**    | Exactly one of the three variants below                                 |
-| `name`      | string       | **required**    | Home Assistant friendly name; must be non-empty                         |
-| `mqtt_path` | string       | `slugify(name)` | MQTT topic slug for this device; must be unique across all `[[device]]` |
-
-The `matcher` variants, in order of how reliably they survive reboots:
-
-* `matcher = { unique_id = "..." }` — exact match against the kernel's
-  `EVIOCGUNIQ` value (same as `/sys/class/input/eventN/device/uniq`).
-  Best when the device exposes one — most USB HID devices expose a
-  serial number; Bluetooth devices expose a MAC address.
-* `matcher = { bus_vendor_product_version = [b, v, p, ver] }` — four
-  `u16`s. Hex literals (`[0x0003, 0x046d, 0xc52b, 0x0111]`) are the
-  natural form. Equivalent to `id/bustype`, `id/vendor`, `id/product`,
-  `id/version` from sysfs. Useful when the device has no `uniq`;
-  matches any device of that model.
-* `matcher = { name = "..." }` — exact, case-sensitive match against
-  `EVIOCGNAME`. Use only when neither of the above is available.
+| Flag                        | What it does                                                                  |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `--daemon`                  | Run the watcher and MQTT bridge. Mutually exclusive with the others.          |
+| `--list-devices`            | Connect, dump the retained device snapshot, exit.                             |
+| `--enable-device SLUG`      | (repeatable) Tell the daemon to enable `SLUG`. Persists across restarts.      |
+| `--disable-device SLUG`     | (repeatable) Disable `SLUG`.                                                  |
+| `--remove-device SLUG`      | (repeatable) Drop `SLUG` from the database and clear its retained MQTT state. |
 
 ## FAQ
 
-### `--detect` finds nothing, or I get "permission denied" on `/dev/input/event*`
+### Where does state live?
 
-The process needs read access to `/dev/input/event*`. When detecting devices,
-using `sudo` to get access is okay.
+In a TOML file at `/var/lib/evmqtt-rs/db.toml` by default
+(`--db` / `EVMQTT_DB` to override). The daemon writes it atomically
+(temp file in the same directory + `rename(2)`), so power loss
+leaves the previous or the new content but never a partial file.
+Observed keys are stored as a `Vec<u16>` of evdev codes to keep the
+file small.
 
-On most distros those files are mode `0660` owned by `root:input`, so the running user
-has to be a member of the `input` group:
+### How do I get a device to show up in Home Assistant?
+
+Plug it in. The daemon detects every `/dev/input/event*` with key
+capability, allocates a slug from the device name, publishes the
+device info + an "Enabled" switch via HA discovery, and adds an
+entry to `db.toml`. Until you enable the switch the daemon doesn't
+touch the device; the console keeps it.
+
+### Why do triggers only appear after I press a key?
+
+By design — that's the only way `evmqtt-rs` knows which keys the
+device emits. HA device triggers are momentary events keyed on
+`(device, key)` pairs, so we can't announce a useful trigger until
+we've seen the key. Once observed, the trigger is retained and HA
+keeps it across restarts.
+
+### Two devices have the same name. Which one wins?
+
+The first one to appear gets the bare slug (`usb-keyboard`); the
+second gets `usb-keyboard-2`, the third `usb-keyboard-3`, and so
+on. Slugs are permanent: once assigned they don't change even if
+the device is renamed by the kernel later. The daemon's matching
+is based on the most precise identifier available, in order:
+`unique_id` (USB serial / Bluetooth MAC), bus/vendor/product/version
+quad, then exact name.
+
+### `/dev/input/event*` is "permission denied"
+
+The running user needs to be in the `input` group. The bundled
+systemd unit handles this automatically via `SupplementaryGroups=input`.
+For interactive use:
 
 ```bash
 sudo usermod -a -G input "$USER"
 # log out + back in
-id -nG | grep -q input && echo "ok"
+id -nG | grep -q input && echo ok
 ```
-
-The provided systemd config puts `evmqtt-rs` into the `input` group automatically.
-
-### Why one trigger per key instead of one sensor per device?
-
-The original Python [`evmqtt`][evmqtt-original] exposes each input
-device as a single `sensor` whose state is the last key code received
-(`"KEY_VOLUMEUP"`, then `"KEY_VOLUMEDOWN"`, …). That model breaks down
-in two ways: pressing the *same* key twice in a row doesn't change the
-sensor state, so HA never re-triggers without a clearing step; and
-modifier combinations have to be encoded as suffixed strings
-(`KEY_A_KEY_LEFTSHIFT_KEY_LEFTCTRL`) that are painful to match.
-
-Per-key `device_trigger`s sidestep both: each key press is an *event*,
-not a state change, so the same key fires every time; and modifiers are
-independent triggers you compose in automations.
-
-### Two devices match the same `[[device]]` — what happens?
-
-First-come wins. Whichever physical device the watcher sees first gets
-that slot; later matches log `device is already attached, ignoring
-duplicate match` at debug level. If you have two identical devices,
-prefer `unique_id` or `bus_vendor_product_version` — `name` matchers
-can't tell them apart.
-
-### What happens when a device disconnects?
-
-The monitor task notices the read error, logs at `info` level
-(`device disconnected; monitor exiting`), and frees its `[[device]]`
-slot. When the device reappears — *even at a different
-`/dev/input/eventN`* — the watcher attaches again and resumes
-publishing to the same MQTT topic, so HA never sees a topology change.
 
 ### Will this hijack my console / X / Wayland keyboard?
 
-It calls `EVIOCGRAB` on each device it monitors — yes, that steals
-input from the console. That's the point: for a media remote you want
-events to flow to MQTT, not show up as stray characters on tty1. But
-*do not* point `evmqtt-rs` at your laptop's primary keyboard.
+Only for devices whose Enabled switch is on. When enabled the
+daemon calls `EVIOCGRAB` and pulls events out of the kernel input
+layer; when disabled it leaves the device alone. *Don't* enable
+the switch on your laptop's primary keyboard.
 
 ### What about key autorepeat / held keys?
 
-Autorepeat (`evdev value=2`) is ignored on purpose — HA device triggers
-are momentary, not stateful. You'll get one `…_press` when the key
-goes down and one `…_release` when it comes up, regardless of how long
-it was held.
+Autorepeat (`evdev value=2`) is ignored on purpose — HA device
+triggers are momentary, not stateful. You get one `…_press` when
+the key goes down and one `…_release` when it comes up, regardless
+of how long it was held.
 
 ### How do I increase the logging level?
 
 Set the `EVMQTT_LOG` environment variable to `debug` or `trace`.
-
-`EVMQTT_LOG` accepts any [`tracing` `EnvFilter`][envfilter] directive,
-so `EVMQTT_LOG=evmqtt_rs::watcher=trace,info` works for narrowing.
+Any [`tracing` `EnvFilter`][envfilter] directive works.
 
 [envfilter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html
 
-### Triggers don't show up in HA
+## Comparison with alternatives
 
-They're published lazily, the first time you press the corresponding
-key. If you want them pre-populated, press each key once with HA's
-MQTT integration listening — the discovery message is retained, so HA
-will keep it across restarts.
+### vs Home Assistant's [`keyboard_remote`] integration
+
+* `keyboard_remote` is effectively unmaintained; `evmqtt-rs` is
+  actively developed and accepting fixes.
+* `keyboard_remote` is YAML-only. `evmqtt-rs` exposes each device
+  in the HA UI as an MQTT device with an Enabled switch; no
+  `configuration.yaml` editing required.
+* `evmqtt-rs` triggers carry readable names
+  (`volumeup_press`, `volumedown_release`, ...) instead of raw
+  numeric key codes.
+* `keyboard_remote` only sees keyboards plugged into the host that
+  is running Home Assistant. `evmqtt-rs` runs anywhere on the
+  network and talks to HA over MQTT, so the keyboard can live on a
+  Raspberry Pi Zero in another room, a NUC by the TV, etc.
+
+[`keyboard_remote`]: https://www.home-assistant.io/integrations/keyboard_remote/
+
+### vs the original Python [`evmqtt`][evmqtt-original]
+
+* The original models each device as a single HA `sensor` whose
+  state is the last key code seen, so pressing the same key twice
+  in a row never changes the state and HA does not refire. With
+  `evmqtt-rs`, every press/release is an independent device
+  trigger, fired every time.
+* Hotplug: `evmqtt-rs` watches `/dev/input` with inotify and
+  re-attaches automatically when a device disappears and comes
+  back. This matters for Bluetooth keyboards in particular -- they
+  routinely drop off and reappear under a new `eventN`, and the
+  original `evmqtt` requires a process restart in that case.
+* Lower footprint: `evmqtt-rs` ships as a single ~5 MiB static
+  binary and uses around 20 MiB of RAM at runtime, vs a CPython
+  install plus the `evdev` and `paho-mqtt` modules.
 
 ## Acknowledgments
 
