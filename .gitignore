@@ -1,3 +1,4 @@
 /target/
 dist/
+.zig-cache/
 .intentionally-empty-file.o
