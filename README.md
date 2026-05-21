@@ -50,20 +50,12 @@ HA's MQTT integration listening — the discovery message is retained.
 
 Prerequisites: Linux machine with connected keyboard and an MQTT broker.
 
-1. Download the binary for your achitecture from
+1. Install the package for your OS and achitecture from
    <https://github.com/bdolgov/evmqtt-rs/releases/latest>,
-   or build it manually. Install it into `/usr/local/bin`.
+   or build the binary manually using `cargo build`.
 
-   ```bash
-   git clone https://github.com/bdolgov/evmqtt-rs.git
-   cd evmqtt-rs
-   cargo build --release
-   sudo install -m 755 target/release/evmqtt-rs /usr/local/bin/evmqtt-rs
-   ```
-
-2. Write the environment file with your MQTT credentials. The same file is
-   used by the systemd service **and** sourced from the shell when you run
-   management commands by hand.
+2. Write the environment file with your MQTT credentials into
+   `/etc/evmqtt-rs.env`:
 
    ```bash
    sudo install -m 600 /dev/stdin /etc/evmqtt-rs.env <<'EOF'
@@ -78,18 +70,23 @@ Prerequisites: Linux machine with connected keyboard and an MQTT broker.
    EOF
    ```
 
-3. Install and start the systemd service:
+3. Start the service. When on `systemd` (Debian, Arch, ...):
 
    ```bash
-   sudo install -m 644 evmqtt-rs.service /etc/systemd/system/evmqtt-rs.service
-   sudo systemctl daemon-reload
    sudo systemctl enable --now evmqtt-rs.service
    ```
 
-   (Or write a similar unit for your init system if you are not using
-   systemd. The daemon needs `--daemon`, an `input`-group identity for
-   `/dev/input/event*` access, and a writable state directory for
-   `db.toml` — pointed at by `EVMQTT_DB`.)
+   When on Alpine Linux:
+
+   ```bash
+   rc-update add evmqtt-rs default
+   rc-service evmqtt-rs start
+   ```
+
+   Otherwise: configure your operating system to run `evmqtt-rs --daemon` with
+   environment varaibles set from `/etc/evmqtt-rs.env`, with access to
+   `/dev/input/*` devices, and with write access to `/var/lib/evmqtt-rs/`
+   directory.
 
 4. Enable a device. Either flip its "Enabled" switch in Home Assistant, or
    run the CLI by hand:

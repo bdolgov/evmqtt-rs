@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+
+name="evmqtt-rs"
+description="Turns keyboard key presses into MQTT messages"
+
+command="/usr/bin/evmqtt-rs"
+command_args="--daemon"
+command_user="evmqtt-rs:evmqtt-rs"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_logger="logger -t ${RC_SVCNAME} -p daemon.info"
+error_logger="logger -t ${RC_SVCNAME} -p daemon.err"
+supervisor="supervise-daemon"
+respawn_delay=3
+
+depend() {
+    need net
+    after net
+}
+
+start_pre() {
+    if [ -f /etc/evmqtt-rs.env ]; then
+        set -a
+        # shellcheck disable=SC1091
+        . /etc/evmqtt-rs.env
+        set +a
+    fi
+    : "${EVMQTT_DB:=/var/lib/evmqtt-rs/db.toml}"
+    export EVMQTT_DB
+    checkpath -d -m 0750 -o evmqtt-rs:evmqtt-rs /var/lib/evmqtt-rs
+}

@@ -19,6 +19,57 @@ archives:
   - formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}-{{ .Arch }}
+    wrap_in_directory: true
+
+nfpms:
+  - id: packages
+    package_name: evmqtt-rs
+    vendor: Boris Dolgov
+    maintainer: Boris Dolgov <boris@dolgov.name>
+    homepage: https://github.com/bdolgov/evmqtt-rs
+    license: MIT
+    description: Turns keyboard key presses into MQTT messages.
+    file_name_template: "{{ .ProjectName }}-{{ .Arch }}"
+    formats:
+      - deb
+      - archlinux
+      - rpm
+      - apk
+    bindir: /usr/bin
+    overrides:
+      apk:
+        dependencies:
+          - openrc
+        contents:
+          - src: ./packaging/evmqtt-rs.env
+            dst: /etc/evmqtt-rs.env
+            type: "config|noreplace"
+            file_info:
+              mode: 0640
+          - src: ./packaging/evmqtt-rs.openrc
+            dst: /etc/init.d/evmqtt-rs
+            file_info:
+              mode: 0755
+        scripts:
+          postinstall: ./packaging/apk-postinstall.sh
+      deb:
+        contents:
+          - src: ./packaging/evmqtt-rs.service
+            dst: /lib/systemd/system/evmqtt-rs.service
+          - src: ./packaging/evmqtt-rs.env
+            dst: /etc/evmqtt-rs.env.example
+      archlinux:
+        contents:
+          - src: ./packaging/evmqtt-rs.service
+            dst: /usr/lib/systemd/system/evmqtt-rs.service
+          - src: ./packaging/evmqtt-rs.env
+            dst: /etc/evmqtt-rs.env.example
+      rpm:
+        contents:
+          - src: ./packaging/evmqtt-rs.service
+            dst: /usr/lib/systemd/system/evmqtt-rs.service
+          - src: ./packaging/evmqtt-rs.env
+            dst: /etc/evmqtt-rs.env.example
 
 dockers_v2:
   - id: evmqtt-rs

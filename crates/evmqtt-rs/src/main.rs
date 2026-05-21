@@ -1,6 +1,7 @@
 use clap::Parser;
 use evmqtt_rs::config::{Args, Mode, Runtime};
 use evmqtt_rs::{cli, daemon};
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
@@ -12,6 +13,7 @@ fn init_tracing() {
         .with_target(true)
         .with_file(true)
         .with_line_number(true)
+        .with_ansi(std::io::stdout().is_terminal())
         .compact()
         .init();
 }
