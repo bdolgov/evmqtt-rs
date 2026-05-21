@@ -1,4 +1,4 @@
-use evdev::{Device, EventType, KeyCode, RelativeAxisCode};
+use evdev::{AttributeSetRef, Device, EventType, KeyCode, RelativeAxisCode};
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 use tracing::warn;
@@ -186,7 +186,17 @@ pub fn capability_fingerprint(device: &Device) -> String {
 /// no REL, ...) falls through to `"other"`; distinctness between
 /// them is preserved by the capability fingerprint, not by the tag.
 pub fn capability_tag(device: &Device) -> &'static str {
-    if let Some(keys) = device.supported_keys() {
+    classify_capabilities(device.supported_keys(), device.supported_relative_axes())
+}
+
+/// Inner classifier — same logic as [`capability_tag`] but takes the
+/// capability sets directly so unit tests can drive it without a real
+/// evdev `Device`.
+fn classify_capabilities(
+    keys: Option<&AttributeSetRef<KeyCode>>,
+    rels: Option<&AttributeSetRef<RelativeAxisCode>>,
+) -> &'static str {
+    if let Some(keys) = keys {
         if keys.contains(KeyCode::KEY_A) {
             return "kbd";
         }
@@ -194,7 +204,7 @@ pub fn capability_tag(device: &Device) -> &'static str {
             return "numpad";
         }
     }
-    if let Some(rels) = device.supported_relative_axes()
+    if let Some(rels) = rels
         && rels.contains(RelativeAxisCode::REL_X)
         && rels.contains(RelativeAxisCode::REL_Y)
     {
@@ -220,5 +230,66 @@ mod tests {
         assert!(!is_event_node("mice"));
         assert!(!is_event_node("js0"));
         assert!(!is_event_node("by-id"));
+    }
+
+    use evdev::AttributeSet;
+
+    fn keys(codes: &[KeyCode]) -> AttributeSet<KeyCode> {
+        let mut s = AttributeSet::<KeyCode>::new();
+        for c in codes {
+            s.insert(*c);
+        }
+        s
+    }
+
+    fn rels(codes: &[RelativeAxisCode]) -> AttributeSet<RelativeAxisCode> {
+        let mut s = AttributeSet::<RelativeAxisCode>::new();
+        for c in codes {
+            s.insert(*c);
+        }
+        s
+    }
+
+    #[test]
+    fn classify_kbd_when_key_a_present() {
+        let k = keys(&[KeyCode::KEY_A, KeyCode::KEY_VOLUMEUP]);
+        assert_eq!(classify_capabilities(Some(&k), None), "kbd");
+    }
+
+    #[test]
+    fn classify_numpad_when_key_kp0_present_but_no_key_a() {
+        let k = keys(&[KeyCode::KEY_KP0, KeyCode::KEY_KP1]);
+        assert_eq!(classify_capabilities(Some(&k), None), "numpad");
+    }
+
+    #[test]
+    fn classify_kbd_wins_over_numpad() {
+        // KEY_A wins even when KP keys are also present.
+        let k = keys(&[KeyCode::KEY_A, KeyCode::KEY_KP0]);
+        assert_eq!(classify_capabilities(Some(&k), None), "kbd");
+    }
+
+    #[test]
+    fn classify_mouse_when_rel_xy_present() {
+        let r = rels(&[RelativeAxisCode::REL_X, RelativeAxisCode::REL_Y]);
+        assert_eq!(classify_capabilities(None, Some(&r)), "mouse");
+    }
+
+    #[test]
+    fn classify_other_when_only_rel_x() {
+        let r = rels(&[RelativeAxisCode::REL_X]);
+        assert_eq!(classify_capabilities(None, Some(&r)), "other");
+    }
+
+    #[test]
+    fn classify_other_when_no_caps() {
+        assert_eq!(classify_capabilities(None, None), "other");
+    }
+
+    #[test]
+    fn classify_other_when_keys_but_no_letters_or_kp() {
+        // Power/consumer-control buttons: neither KEY_A nor KEY_KP0.
+        let k = keys(&[KeyCode::KEY_POWER, KeyCode::KEY_MUTE]);
+        assert_eq!(classify_capabilities(Some(&k), None), "other");
     }
 }

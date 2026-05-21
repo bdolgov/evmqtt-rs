@@ -263,7 +263,11 @@ impl Database {
     }
 
     /// First record whose stored identifiers match the live identity.
-    pub fn match_identity(&self, id: &DeviceIdentity) -> Option<&DeviceRecord> {
+    /// Test-only: production code goes through
+    /// [`Database::match_or_insert`] so the backfill of
+    /// previously-absent fields happens in lockstep with the match.
+    #[cfg(test)]
+    fn match_identity(&self, id: &DeviceIdentity) -> Option<&DeviceRecord> {
         self.devices.iter().find(|d| d.matches(id))
     }
 

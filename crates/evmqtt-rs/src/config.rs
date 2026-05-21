@@ -43,7 +43,7 @@ pub struct Args {
     )]
     pub mqtt_client_id_prefix: String,
 
-    /// MQTT keepalive in seconds (clamped to 5).
+    /// MQTT keepalive in seconds (clamped to a minimum of 5).
     #[arg(long, env = "EVMQTT_MQTT_KEEPALIVE_SECS", default_value_t = 30)]
     pub mqtt_keepalive_secs: u16,
 
