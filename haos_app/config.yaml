@@ -1,6 +1,6 @@
 name: "evmqtt-rs"
-description: "evmqtt-rs turns keyboard key presses into MQTT messages."
-version: "0.1.0"
+description: "evmqtt-rs turns keyboard key presses into MQTT messages"
+version: "0.2.0"
 slug: "evmqtt_rs"
 init: false
 url: "https://github.com/bdolgov/evmqtt-rs"

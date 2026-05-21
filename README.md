@@ -10,23 +10,49 @@ of disk and 20 MiB of RAM.
 
 ## Highlights
 
-* No static device list — every `/dev/input/event*` keyboard is auto-detected
+* No static device list — every connected device with buttons is auto-detected
   and announced to Home Assistant on first sighting.
 * Each detected device shows up in HA with an **Enabled** switch. Flip it on
   and `evmqtt-rs` starts grabbing events from that device; flip it off and
-  the device returns to the kernel. State survives restarts.
+  the device returns to the kernel. State survives restarts. and disconnects.
 * Triggers are added to HA per-key, lazily — the first time you press a key
   on an enabled device, that key's `*_press` / `*_release` triggers appear
   in HA, ready to use in automations.
 
-## Installation
+## Installation (HAOS)
 
-Prerequisites: Linux machine with connected keyboard, [Rust toolchain], and an
-MQTT broker.
+Add this repository to the home assistant App store:
 
-[Rust toolchain]: https://rustup.rs
+[![Open your Home Assistant instance and show the add app repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fbdolgov%2Fevmqtt-rs)
 
-1. Build and install the binary:
+Install evmqtt-rs and start it.
+
+For instructions for non-HAOS machines, see [Installation (manual)](#installation-manual).
+
+## Home Assistant Integration
+
+Every detected device gets:
+
+* An **Enabled** switch component, wired to the daemon's enable/disable
+  control topic. Flipping the switch in HA enables or disables monitoring
+  for that device.
+* One [MQTT Device Trigger] pair (`*_press` and `*_release`) for every key
+  the daemon has ever observed on that device. The discovery payload is
+  re-published whenever a new key arrives.
+
+Triggers only appear after a key has been pressed at least once with the
+device enabled. If you want them pre-populated, press each key once with
+HA's MQTT integration listening — the discovery message is retained.
+
+[MQTT Device Trigger]: https://www.home-assistant.io/integrations/device_trigger.mqtt/
+
+## Installation (manual)
+
+Prerequisites: Linux machine with connected keyboard and an MQTT broker.
+
+1. Download the binary for your achitecture from
+   <https://github.com/bdolgov/evmqtt-rs/releases/latest>,
+   or build it manually. Install it into `/usr/local/bin`.
 
    ```bash
    git clone https://github.com/bdolgov/evmqtt-rs.git
@@ -89,35 +115,15 @@ MQTT broker.
    sudo journalctl -fu evmqtt-rs.service
    ```
 
-## Home Assistant Integration
-
-`evmqtt-rs` uses Home Assistant [device-based MQTT discovery]: one retained
-config message per device, at `<discovery_prefix>/device/<id>/config`. Every
-detected device gets:
-
-* An **Enabled** switch component, wired to the daemon's enable/disable
-  control topic. Flipping the switch in HA enables or disables monitoring
-  for that device.
-* One [MQTT Device Trigger] pair (`*_press` and `*_release`) for every key
-  the daemon has ever observed on that device. The discovery payload is
-  re-published whenever a new key arrives.
-
-Triggers only appear after a key has been pressed at least once with the
-device enabled. If you want them pre-populated, press each key once with
-HA's MQTT integration listening — the discovery message is retained.
-
-[device-based MQTT discovery]: https://www.home-assistant.io/integrations/mqtt/#device-based-discovery
-[MQTT Device Trigger]: https://www.home-assistant.io/integrations/device_trigger.mqtt/
-
 ## MQTT Topic Structure
 
-| Topic                                            | Direction        | Notes                                                |
-| ------------------------------------------------ | -----------------| ---------------------------------------------------- |
-| `<topic_prefix>/status`                          | evmqtt → broker  | `online` / `offline` (LWT)                           |
-| `<topic_prefix>/_devices/<slug>`                 | evmqtt → broker  | Retained JSON describing the device                  |
-| `<topic_prefix>/_devices/<slug>/enabled`         | both directions  | Retained `on` / `off`. Write to control the daemon   |
-| `<topic_prefix>/<slug>/action`                   | evmqtt → broker  | `<key>_press` / `<key>_release` events               |
-| `<discovery_prefix>/device/<id>/config`          | evmqtt → broker  | HA device-based discovery payload                    |
+| Topic                                    | Direction       | Notes                                              |
+| ---------------------------------------- | --------------- | -------------------------------------------------- |
+| `<topic_prefix>/status`                  | evmqtt → broker | `online` / `offline` (LWT)                         |
+| `<topic_prefix>/_devices/<slug>`         | evmqtt → broker | Retained JSON describing the device                |
+| `<topic_prefix>/_devices/<slug>/enabled` | both directions | Retained `on` / `off`. Write to control the daemon |
+| `<topic_prefix>/<slug>/action`           | evmqtt → broker | `<key>_press` / `<key>_release` events             |
+| `<discovery_prefix>/device/<id>/config`  | evmqtt → broker | HA device-based discovery payload                  |
 
 `<slug>` is the daemon-assigned id (slugified name with `-2`, `-3`, … on
 collision); `<id>` is `<topic_prefix>_<slug>`.
@@ -135,39 +141,39 @@ variable so the daemon can be driven entirely from a systemd
 
 ### MQTT (`EVMQTT_MQTT_*`)
 
-| Flag                        | Env                              | Default       |
-| --------------------------- | -------------------------------- | ------------- |
-| `--mqtt-host`               | `EVMQTT_MQTT_HOST`               | **required**  |
-| `--mqtt-port`               | `EVMQTT_MQTT_PORT`               | `1883`        |
-| `--mqtt-username`           | `EVMQTT_MQTT_USERNAME`           | none          |
-| `--mqtt-password`           | `EVMQTT_MQTT_PASSWORD`           | none          |
-| `--mqtt-topic-prefix`       | `EVMQTT_MQTT_TOPIC_PREFIX`       | `evmqtt`      |
-| `--mqtt-client-id-prefix`   | `EVMQTT_MQTT_CLIENT_ID_PREFIX`   | `evmqtt-rs`   |
-| `--mqtt-keepalive-secs`     | `EVMQTT_MQTT_KEEPALIVE_SECS`     | `30`          |
+| Flag                      | Env                            | Default      |
+| ------------------------- | ------------------------------ | ------------ |
+| `--mqtt-host`             | `EVMQTT_MQTT_HOST`             | **required** |
+| `--mqtt-port`             | `EVMQTT_MQTT_PORT`             | `1883`       |
+| `--mqtt-username`         | `EVMQTT_MQTT_USERNAME`         | none         |
+| `--mqtt-password`         | `EVMQTT_MQTT_PASSWORD`         | none         |
+| `--mqtt-topic-prefix`     | `EVMQTT_MQTT_TOPIC_PREFIX`     | `evmqtt`     |
+| `--mqtt-client-id-prefix` | `EVMQTT_MQTT_CLIENT_ID_PREFIX` | `evmqtt-rs`  |
+| `--mqtt-keepalive-secs`   | `EVMQTT_MQTT_KEEPALIVE_SECS`   | `30`         |
 
 ### Home Assistant (`EVMQTT_HASS_*`)
 
-| Flag                        | Env                              | Default          |
-| --------------------------- | -------------------------------- | ---------------- |
-| `--hass-enabled`            | `EVMQTT_HASS_ENABLED`            | `true`           |
-| `--hass-discovery-prefix`   | `EVMQTT_HASS_DISCOVERY_PREFIX`   | `homeassistant`  |
-| `--hass-name`               | `EVMQTT_HASS_NAME`               | same as `--mqtt-topic-prefix` |
+| Flag                      | Env                            | Default                       |
+| ------------------------- | ------------------------------ | ----------------------------- |
+| `--hass-enabled`          | `EVMQTT_HASS_ENABLED`          | `true`                        |
+| `--hass-discovery-prefix` | `EVMQTT_HASS_DISCOVERY_PREFIX` | `homeassistant`               |
+| `--hass-name`             | `EVMQTT_HASS_NAME`             | same as `--mqtt-topic-prefix` |
 
 ### Local state
 
-| Flag           | Env             | Default                          |
-| -------------- | --------------- | -------------------------------- |
-| `--db PATH`    | `EVMQTT_DB`     | `/var/lib/evmqtt-rs/db.toml`     |
+| Flag        | Env         | Default                      |
+| ----------- | ----------- | ---------------------------- |
+| `--db PATH` | `EVMQTT_DB` | `/var/lib/evmqtt-rs/db.toml` |
 
 ### Modes
 
-| Flag                        | What it does                                                                  |
-| --------------------------- | ----------------------------------------------------------------------------- |
-| `--daemon`                  | Run the watcher and MQTT bridge. Mutually exclusive with the others.          |
-| `--list-devices`            | Connect, dump the retained device snapshot, exit.                             |
-| `--enable-device SLUG`      | (repeatable) Tell the daemon to enable `SLUG`. Persists across restarts.      |
-| `--disable-device SLUG`     | (repeatable) Disable `SLUG`.                                                  |
-| `--remove-device SLUG`      | (repeatable) Drop `SLUG` from the database and clear its retained MQTT state. |
+| Flag                    | What it does                                                                  |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| `--daemon`              | Run the watcher and MQTT bridge. Mutually exclusive with the others.          |
+| `--list-devices`        | Connect, dump the retained device snapshot, exit.                             |
+| `--enable-device SLUG`  | (repeatable) Tell the daemon to enable `SLUG`. Persists across restarts.      |
+| `--disable-device SLUG` | (repeatable) Disable `SLUG`.                                                  |
+| `--remove-device SLUG`  | (repeatable) Drop `SLUG` from the database and clear its retained MQTT state. |
 
 ## FAQ
 
