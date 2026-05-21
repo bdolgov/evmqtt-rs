@@ -9,7 +9,7 @@ a simple keyboard is the best remote control for your smart home.
   and announced to Home Assistant on first sighting.
 * Each detected device shows up in HA with an **Enabled** switch. Flip it on
   and `evmqtt-rs` starts grabbing events from that device; flip it off and
-  the device returns to the kernel. State survives restarts. and disconnects.
+  the device returns to the kernel. State survives restarts and disconnects.
 * Triggers are added to HA per-key, lazily — the first time you press a key
   on an enabled device, that key's `*_press` / `*_release` triggers appear
   in HA, ready to use in automations.
