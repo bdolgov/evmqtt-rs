@@ -4,11 +4,10 @@
 //! drives the public flow from outside the binary:
 //!   1. Both devices appear in MQTT and HA, disabled by default.
 //!   2. Enabling one device starts monitoring only that device.
-//!   3. Key presses on the enabled device flow to its action topic
-//!      and grow its HA discovery payload to include the new keys.
+//!   3. Key presses on the enabled device flow to its action topic and grow its HA discovery
+//!      payload to include the new keys.
 //!   4. Enabling the second device works independently of the first.
-//!   5. Removing one device clears its retained MQTT state without
-//!      touching the other.
+//!   5. Removing one device clears its retained MQTT state without touching the other.
 //!
 //! Skip on systems where `/dev/uinput` is not writable:
 //!     cargo test -- --skip integration_test
@@ -17,9 +16,9 @@
 
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode};
-use evmqtt_rs::daemon;
 use evmqtt_rs::client::Client;
 use evmqtt_rs::config::{HassConfig, MqttConfig};
+use evmqtt_rs::daemon;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use rumqttd::{Broker, Config as BrokerConfig, ConnectionSettings, RouterConfig, ServerSettings};
 use serde_json::Value;
@@ -39,21 +38,21 @@ async fn integration_test() {
     let mut h = Harness::new().await;
     h.start_daemon().await;
 
-    // 1. Connect two devices with distinct (vendor, product) so the
-    //    daemon allocates two slugs without collision. Slug derivation
-    //    lives in `slug::slugify` and is exercised by its own unit
-    //    tests; the names below slugify to "evmqtt-rs-e2e-a-kbd" and
-    //    "evmqtt-rs-e2e-b-kbd" -- both used as literal strings throughout
-    //    so a reader can grep for either.
+    // 1. Connect two devices with distinct (vendor, product) so the daemon allocates two slugs
+    //    without collision. Slug derivation lives in `slug::slugify` and is exercised by its own
+    //    unit tests; the names below slugify to "evmqtt-rs-e2e-a-kbd" and "evmqtt-rs-e2e-b-kbd" --
+    //    both used as literal strings throughout so a reader can grep for either.
     h.connect_device(0, "evmqtt-rs e2e A", 0xCAFE, 0xBABE);
     h.connect_device(1, "evmqtt-rs e2e B", 0xDEAD, 0xBEEF);
 
-    // 2. Both devices are announced as retained info + retained
-    //    enabled=off + retained HA discovery.
+    // 2. Both devices are announced as retained info + retained enabled=off + retained HA
+    //    discovery.
     let info_a_json: Value =
-        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a-kbd").await).unwrap();
+        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-a-kbd").await)
+            .unwrap();
     let info_b_json: Value =
-        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b-kbd").await).unwrap();
+        serde_json::from_str(&h.wait_retained("evmqtt/_devices/evmqtt-rs-e2e-b-kbd").await)
+            .unwrap();
     assert_eq!(info_a_json["slug"], "evmqtt-rs-e2e-a-kbd");
     assert_eq!(info_a_json["name"], "evmqtt-rs e2e A (kbd)");
     assert_eq!(info_a_json["vendor"], 0xCAFE);
@@ -97,8 +96,8 @@ async fn integration_test() {
         "no triggers before any keys are observed on A",
     );
 
-    // 3. Enable A only. The daemon mirrors "on" back and starts the
-    //    monitor for A; B stays unmonitored.
+    // 3. Enable A only. The daemon mirrors "on" back and starts the monitor for A; B stays
+    //    unmonitored.
     h.enable("evmqtt-rs-e2e-a-kbd").await;
     h.wait_for_publish("evmqtt/_devices/evmqtt-rs-e2e-a-kbd/enabled", |p| p == "on")
         .await;
@@ -112,9 +111,10 @@ async fn integration_test() {
     h.send_key(0, KeyCode::KEY_A, false);
     h.wait_for_publish("evmqtt/evmqtt-rs-e2e-a-kbd/action", |p| p == "a_release")
         .await;
-    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-a-kbd/config", |p| {
-        p.contains("a_press") && p.contains("a_release")
-    })
+    h.wait_for_publish(
+        "homeassistant/device/evmqtt_evmqtt-rs-e2e-a-kbd/config",
+        |p| p.contains("a_press") && p.contains("a_release"),
+    )
     .await;
 
     // B is still disabled. Pressing on B must not produce an action
@@ -127,14 +127,11 @@ async fn integration_test() {
         "B is disabled; no action publishes should appear for it",
     );
 
-    // 4. Drop A's uinput device and recreate it under the same
-    //    name+vendor+product. This is the bluetooth-keyboard reconnect
-    //    case: the kernel hands out a different /dev/input/eventN, but
-    //    the daemon must match the new identity to the existing DB
-    //    record and resume monitoring under the original slug. The
-    //    next keypress on the *new* uinput instance must still appear
-    //    on `evmqtt/evmqtt-rs-e2e-a-kbd/action`, not on a freshly minted
-    //    slug.
+    // 4. Drop A's uinput device and recreate it under the same name+vendor+product. This is the
+    //    bluetooth-keyboard reconnect case: the kernel hands out a different /dev/input/eventN, but
+    //    the daemon must match the new identity to the existing DB record and resume monitoring
+    //    under the original slug. The next keypress on the *new* uinput instance must still appear
+    //    on `evmqtt/evmqtt-rs-e2e-a-kbd/action`, not on a freshly minted slug.
     h.disconnect_device(0);
     tokio::time::sleep(Duration::from_millis(500)).await;
     h.connect_device(0, "evmqtt-rs e2e A", 0xCAFE, 0xBABE);
@@ -164,9 +161,10 @@ async fn integration_test() {
     h.send_key(1, KeyCode::KEY_B, false);
     h.wait_for_publish("evmqtt/evmqtt-rs-e2e-b-kbd/action", |p| p == "b_release")
         .await;
-    h.wait_for_publish("homeassistant/device/evmqtt_evmqtt-rs-e2e-b-kbd/config", |p| {
-        p.contains("b_press") && p.contains("b_release")
-    })
+    h.wait_for_publish(
+        "homeassistant/device/evmqtt_evmqtt-rs-e2e-b-kbd/config",
+        |p| p.contains("b_press") && p.contains("b_release"),
+    )
     .await;
 
     h.shutdown().await;

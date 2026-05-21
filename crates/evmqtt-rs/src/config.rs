@@ -184,7 +184,9 @@ impl Args {
             return Err("--hass-discovery-prefix must not be empty");
         }
 
-        let hass_name = self.hass_name.unwrap_or_else(|| self.mqtt_topic_prefix.clone());
+        let hass_name = self
+            .hass_name
+            .unwrap_or_else(|| self.mqtt_topic_prefix.clone());
         Ok(Runtime {
             mqtt: MqttConfig {
                 host: self.mqtt_host,

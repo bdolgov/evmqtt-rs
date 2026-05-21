@@ -28,7 +28,15 @@ pub fn start(
 ) -> MonitorHandle {
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let join = tokio::spawn(async move {
-        run_device(handle, action_topic, slug, identity, coordinator, shutdown_rx).await;
+        run_device(
+            handle,
+            action_topic,
+            slug,
+            identity,
+            coordinator,
+            shutdown_rx,
+        )
+        .await;
     });
     MonitorHandle {
         join,
@@ -37,10 +45,8 @@ pub fn start(
 }
 
 /// Drive one device's event stream. Returns when:
-/// - the device disappears (ENODEV / stream end) -- sends
-///   `DeviceDisconnected` first.
-/// - the `shutdown` oneshot fires -- does NOT send disconnect; the
-///   coordinator already knows.
+/// - the device disappears (ENODEV / stream end) -- sends `DeviceDisconnected` first.
+/// - the `shutdown` oneshot fires -- does NOT send disconnect; the coordinator already knows.
 pub async fn run_device(
     handle: MqttHandle,
     action_topic: Arc<str>,

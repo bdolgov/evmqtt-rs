@@ -467,8 +467,7 @@ mod tests {
         db.insert(&ident("GPIO Keys", None, 0, 0, 0, 0));
         let same_caps = ident("Different label", None, 0, 0, 0, 0);
         assert!(db.match_identity(&same_caps).is_some());
-        let different_caps =
-            ident_with_cap("GPIO Keys", 0, 0, 0, 0, "ffffffffffffffff", "other");
+        let different_caps = ident_with_cap("GPIO Keys", 0, 0, 0, 0, "ffffffffffffffff", "other");
         assert!(db.match_identity(&different_caps).is_none());
     }
 
@@ -610,14 +609,7 @@ mod tests {
         // sub-device of the same dongle is then correctly seen as
         // distinct.
         let mut db = Database::default();
-        db.insert(&ident(
-            "Logitech Receiver",
-            None,
-            3,
-            0x046d,
-            0xc52b,
-            0x0111,
-        ));
+        db.insert(&ident("Logitech Receiver", None, 3, 0x046d, 0xc52b, 0x0111));
         db.devices[0].capability_fingerprint = None;
         db.devices[0].capability_tag = None;
         db.devices[0].physical_path = None;
@@ -634,7 +626,10 @@ mod tests {
         let outcome = db.match_or_insert(&kbd);
         assert!(matches!(
             outcome,
-            MatchOutcome::Matched { backfilled: true, .. }
+            MatchOutcome::Matched {
+                backfilled: true,
+                ..
+            }
         ));
         assert_eq!(
             db.devices[0].capability_fingerprint.as_deref(),

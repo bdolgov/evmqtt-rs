@@ -1,8 +1,8 @@
 pub mod cli;
-pub mod daemon;
 pub mod client;
 pub mod config;
 pub mod coordinator;
+pub mod daemon;
 pub mod db;
 pub mod discovery;
 pub mod hass;

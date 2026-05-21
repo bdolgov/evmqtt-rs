@@ -1,9 +1,7 @@
 use crate::config::MqttConfig;
 use crate::topics::PAYLOAD_NOT_AVAILABLE;
 use anyhow::{Result, anyhow};
-use rumqttc::{
-    AsyncClient, ConnectionError, Event, EventLoop, LastWill, MqttOptions, Packet, QoS,
-};
+use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, LastWill, MqttOptions, Packet, QoS};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -99,9 +97,8 @@ pub struct MqttRuntime {
 /// Three-state lifecycle of the rumqttc eventloop:
 /// * `Connecting` -- initial; or a transient error is being retried.
 /// * `Connected` -- the broker has sent CONNACK.
-/// * `PermanentFailure(reason)` -- a clearly-fatal error
-///   (`ConnectionRefused`, TLS handshake failure, protocol mismatch)
-///   was observed; the eventloop has stopped retrying and exited.
+/// * `PermanentFailure(reason)` -- a clearly-fatal error (`ConnectionRefused`, TLS handshake
+///   failure, protocol mismatch) was observed; the eventloop has stopped retrying and exited.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConnState {
     #[default]

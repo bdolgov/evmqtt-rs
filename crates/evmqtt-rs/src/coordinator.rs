@@ -179,9 +179,7 @@ impl Coordinator {
                 (slug, true, true)
             }
         };
-        if persist
-            && let Err(e) = self.db.save_atomic(&self.db_path)
-        {
+        if persist && let Err(e) = self.db.save_atomic(&self.db_path) {
             warn!(error = %e, "failed to persist DB after device sighting");
         }
         if freshly_inserted {
