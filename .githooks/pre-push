@@ -1,0 +1,13 @@
+#!/bin/sh
+# Block pushes to main unless the same checks CI runs are green locally.
+set -e
+
+protected_branch="main"
+remote="$1"
+
+while read -r _local_ref _local_oid remote_ref _remote_oid; do
+    if [ "$remote_ref" = "refs/heads/$protected_branch" ]; then
+        echo "pre-push: running 'just presubmit' before push to $protected_branch on $remote..."
+        exec just presubmit
+    fi
+done
