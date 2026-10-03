@@ -183,6 +183,9 @@ pub fn spawn(cfg: &MqttConfig, client_id: String, availability_topic: String) ->
 
     let mut options = MqttOptions::new(client_id, cfg.host.clone(), cfg.port);
     options.set_keep_alive(Duration::from_secs(cfg.keepalive_secs.max(5) as u64));
+    if let Some(size) = cfg.max_packet_size {
+        options.set_max_packet_size(size, size);
+    }
     options.set_clean_session(true);
     options.set_last_will(LastWill::new(
         availability_topic,

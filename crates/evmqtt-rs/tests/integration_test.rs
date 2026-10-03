@@ -232,6 +232,7 @@ impl Harness {
             topic_prefix: "evmqtt".into(),
             client_id_prefix: client_id_prefix.into(),
             keepalive_secs: 30,
+            max_packet_size: None,
         }
     }
 
