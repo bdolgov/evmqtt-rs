@@ -1,0 +1,5 @@
+FROM scratch
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/evmqtt-rs /
+ENTRYPOINT [ "/evmqtt-rs" ]

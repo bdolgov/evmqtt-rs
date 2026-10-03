@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,6 +12,9 @@ permissions:
 
 jobs:
   goreleaser:
+    env:
+      REGISTRY: ghcr.io
+      REGISTRY_IMAGE: ghcr.io/${{ github.repository }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -21,13 +25,22 @@ jobs:
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
       - uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: release --clean
+          args: release --clean ${{ github.ref_type != 'tag' && '--snapshot' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ env.REGISTRY_IMAGE }}
+          METADATA_MAINTAINER: ${{ github.repository_owner }}
+          METADATA_VENDOR: ${{ github.repository_owner }}
+          METADATA_HOMEPAGE: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.url'] }}
+          METADATA_LICENSE: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.licenses'] }}
+          METADATA_DESCRIPTION: ${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.description'] }}
+      - run: docker run --rm "${{ env.REGISTRY_IMAGE }}" --help

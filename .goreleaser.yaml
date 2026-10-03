@@ -10,7 +10,7 @@ builds:
   - builder: rust
     flags:
       - --release
-      - --package=evmqtt-rs
+      - --package={{ .ProjectName }}
     targets:
       - x86_64-unknown-linux-musl
       - aarch64-unknown-linux-musl
@@ -23,12 +23,12 @@ archives:
 
 nfpms:
   - id: packages
-    package_name: evmqtt-rs
-    vendor: Boris Dolgov
-    maintainer: Boris Dolgov <boris@dolgov.name>
-    homepage: https://github.com/bdolgov/evmqtt-rs
-    license: MIT
-    description: Turns keyboard key presses into MQTT messages.
+    package_name: "{{ .ProjectName }}"
+    vendor: "{{ .Env.METADATA_VENDOR }}"
+    maintainer: "{{ .Env.METADATA_MAINTAINER }}"
+    homepage: "{{ .Env.METADATA_HOMEPAGE }}"
+    license: "{{ .Env.METADATA_LICENSE }}"
+    description: "{{ .Env.METADATA_DESCRIPTION }}"
     file_name_template: "{{ .ProjectName }}-{{ .Arch }}"
     formats:
       - deb
@@ -41,51 +41,74 @@ nfpms:
         dependencies:
           - openrc
         contents:
-          - src: ./packaging/evmqtt-rs.env
-            dst: /etc/evmqtt-rs.env
+          - src: ./packaging/{{ .ProjectName }}.env
+            dst: /etc/{{ .ProjectName }}.env
             type: "config|noreplace"
             file_info:
               mode: 0640
-          - src: ./packaging/evmqtt-rs.openrc
-            dst: /etc/init.d/evmqtt-rs
+          - src: ./packaging/{{ .ProjectName }}.openrc
+            dst: /etc/init.d/{{ .ProjectName }}
             file_info:
               mode: 0755
         scripts:
           postinstall: ./packaging/apk-postinstall.sh
       deb:
         contents:
-          - src: ./packaging/evmqtt-rs.service
-            dst: /lib/systemd/system/evmqtt-rs.service
-          - src: ./packaging/evmqtt-rs.env
-            dst: /etc/evmqtt-rs.env.example
+          - src: ./packaging/{{ .ProjectName }}.service
+            dst: /lib/systemd/system/{{ .ProjectName }}.service
+          - src: ./packaging/{{ .ProjectName }}.env
+            dst: /etc/{{ .ProjectName }}.env.example
       archlinux:
         contents:
-          - src: ./packaging/evmqtt-rs.service
-            dst: /usr/lib/systemd/system/evmqtt-rs.service
-          - src: ./packaging/evmqtt-rs.env
-            dst: /etc/evmqtt-rs.env.example
+          - src: ./packaging/{{ .ProjectName }}.service
+            dst: /usr/lib/systemd/system/{{ .ProjectName }}.service
+          - src: ./packaging/{{ .ProjectName }}.env
+            dst: /etc/{{ .ProjectName }}.env.example
       rpm:
         contents:
-          - src: ./packaging/evmqtt-rs.service
-            dst: /usr/lib/systemd/system/evmqtt-rs.service
-          - src: ./packaging/evmqtt-rs.env
-            dst: /etc/evmqtt-rs.env.example
+          - src: ./packaging/{{ .ProjectName }}.service
+            dst: /usr/lib/systemd/system/{{ .ProjectName }}.service
+          - src: ./packaging/{{ .ProjectName }}.env
+            dst: /etc/{{ .ProjectName }}.env.example
 
 dockers_v2:
-  - id: evmqtt-rs
+  - id: "{{ .ProjectName }}-haos"
     images:
-      - "ghcr.io/bdolgov/evmqtt-rs-haos"
+      - "{{ .Env.IMAGE }}-haos"
     tags:
       - "{{ .Version }}"
-      - "latest"
-    platforms:
-      - "linux/amd64"
-      - "linux/arm64"
+      - latest
     dockerfile: haos_app/Dockerfile
     extra_files:
       - haos_app/run.sh
     build_args:
       VERSION: "{{ .Version }}"
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.description: "{{ .Env.METADATA_DESCRIPTION }}"
+      org.opencontainers.image.licenses: "{{ .Env.METADATA_LICENSE }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.title: "{{ .ProjectName }} - HAOS App"
+      org.opencontainers.image.url: "{{ .ReleaseURL }}"
+      org.opencontainers.image.vendor: "{{ .Env.METADATA_VENDOR }}"
+      org.opencontainers.image.version: "{{ .Version }}"
+  - id: "{{ .ProjectName }}"
+    images:
+      - "{{ .Env.IMAGE }}"
+    tags:
+      - "{{ .Version }}"
+      - latest
+    labels:
+      org.opencontainers.image.created: "{{ .Date }}"
+      org.opencontainers.image.description: "{{ .Env.METADATA_DESCRIPTION }}"
+      org.opencontainers.image.licenses: "{{ .Env.METADATA_LICENSE }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.source: "{{ .GitURL }}"
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.url: "{{ .ReleaseURL }}"
+      org.opencontainers.image.vendor: "{{ .Env.METADATA_VENDOR }}"
+      org.opencontainers.image.version: "{{ .Version }}"
 
 changelog:
   sort: asc
