@@ -153,6 +153,8 @@ mod tests {
             topic_prefix: "evmqtt".into(),
             client_id_prefix: "evmqtt-rs".into(),
             keepalive_secs: 30,
+            tls: false,
+            tls_ca: None,
         }
     }
 

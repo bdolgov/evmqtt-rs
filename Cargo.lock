@@ -481,6 +481,7 @@ dependencies = [
  "inotify",
  "rumqttc",
  "rumqttd",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "tabled",

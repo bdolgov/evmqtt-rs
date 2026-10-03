@@ -26,6 +26,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 inotify = { version = "0.11", default-features = false, features = ["stream"] }
 tabled = { version = "0.20", default-features = false, features = ["std"] }
+rustls-native-certs = "0.8.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "time", "test-util"] }

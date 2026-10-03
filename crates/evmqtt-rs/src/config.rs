@@ -20,8 +20,8 @@ pub struct Args {
     pub mqtt_host: String,
 
     /// MQTT broker port.
-    #[arg(long, env = "EVMQTT_MQTT_PORT", default_value_t = 1883)]
-    pub mqtt_port: u16,
+    #[arg(long, env = "EVMQTT_MQTT_PORT")]
+    pub mqtt_port: Option<u16>,
 
     /// MQTT username (omit for anonymous brokers).
     #[arg(long, env = "EVMQTT_MQTT_USERNAME")]
@@ -46,6 +46,15 @@ pub struct Args {
     /// MQTT keepalive in seconds (clamped to a minimum of 5).
     #[arg(long, env = "EVMQTT_MQTT_KEEPALIVE_SECS", default_value_t = 30)]
     pub mqtt_keepalive_secs: u16,
+
+    /// Enable TLS.
+    #[arg(long, env = "EVMQTT_MQTT_TLS")]
+    pub mqtt_tls: bool,
+
+    /// Path to a file or directory containing CA certificates. If omitted, system certificates are
+    /// used.
+    #[arg(long, env = "EVMQTT_MQTT_TLS_CA")]
+    pub mqtt_tls_ca: Option<PathBuf>,
 
     // ── Home Assistant ─────────────────────────────────────────────────
     /// Publish HA discovery payloads when true.
@@ -126,6 +135,8 @@ pub struct MqttConfig {
     pub topic_prefix: String,
     pub client_id_prefix: String,
     pub keepalive_secs: u16,
+    pub tls: bool,
+    pub tls_ca: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -174,7 +185,7 @@ impl Args {
         if self.mqtt_host.trim().is_empty() {
             return Err("--mqtt-host / EVMQTT_MQTT_HOST must not be empty");
         }
-        if self.mqtt_port == 0 {
+        if self.mqtt_port == Some(0) {
             return Err("--mqtt-port must be non-zero");
         }
         if self.mqtt_topic_prefix.trim().is_empty() {
@@ -187,15 +198,24 @@ impl Args {
         let hass_name = self
             .hass_name
             .unwrap_or_else(|| self.mqtt_topic_prefix.clone());
+        let mqtt_port = self
+            .mqtt_port
+            .unwrap_or(if self.mqtt_tls || self.mqtt_tls_ca.is_some() {
+                8883
+            } else {
+                1883
+            });
         Ok(Runtime {
             mqtt: MqttConfig {
                 host: self.mqtt_host,
-                port: self.mqtt_port,
+                port: mqtt_port,
                 username: self.mqtt_username,
                 password: self.mqtt_password,
                 topic_prefix: self.mqtt_topic_prefix,
                 client_id_prefix: self.mqtt_client_id_prefix,
                 keepalive_secs: self.mqtt_keepalive_secs,
+                tls: self.mqtt_tls,
+                tls_ca: self.mqtt_tls_ca,
             },
             hass: HassConfig {
                 enabled: self.hass_enabled,
@@ -293,5 +313,42 @@ mod tests {
     fn rejects_empty_host() {
         let args = parse(&["--daemon", "--mqtt-host", "   "]);
         assert!(args.into_runtime().is_err());
+    }
+
+    #[test]
+    fn default_port_considers_tls() {
+        let args = parse(&["--mqtt-tls", "--list-devices", "--mqtt-host", "broker"]);
+        let rt = args.into_runtime().expect("runtime");
+        assert!(rt.mqtt.tls);
+        assert!(matches!(rt.mqtt.port, 8883));
+    }
+
+    #[test]
+    fn default_port_considers_tls_ca() {
+        let args = parse(&[
+            "--mqtt-tls-ca",
+            "ca",
+            "--list-devices",
+            "--mqtt-host",
+            "broker",
+        ]);
+        let rt = args.into_runtime().expect("runtime");
+        assert_eq!(rt.mqtt.tls_ca.as_ref().unwrap().to_str(), Some("ca"));
+        assert!(matches!(rt.mqtt.port, 8883));
+    }
+
+    #[test]
+    fn custom_port_overrides_default_for_tls() {
+        let args = parse(&[
+            "--mqtt-tls",
+            "--mqtt-port",
+            "1234",
+            "--list-devices",
+            "--mqtt-host",
+            "broker",
+        ]);
+        let rt = args.into_runtime().expect("runtime");
+        assert!(rt.mqtt.tls);
+        assert!(matches!(rt.mqtt.port, 1234));
     }
 }

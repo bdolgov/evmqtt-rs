@@ -1,12 +1,16 @@
 use crate::config::MqttConfig;
 use crate::topics::PAYLOAD_NOT_AVAILABLE;
 use anyhow::{Result, anyhow};
-use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, LastWill, MqttOptions, Packet, QoS};
+use rumqttc::{
+    AsyncClient, ConnectionError, Event, EventLoop, LastWill, MqttOptions, Packet, QoS, Transport,
+};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tracing::{debug, error, info, trace};
 
 #[derive(Debug, Clone)]
@@ -196,6 +200,10 @@ pub fn spawn(cfg: &MqttConfig, client_id: String, availability_topic: String) ->
         options.set_credentials(u, p);
     }
 
+    if let Some(tls_config) = tls_config(cfg.tls, cfg.tls_ca.as_deref()) {
+        options.set_transport(Transport::tls_with_config(tls_config.into()));
+    }
+
     let (client, eventloop) = AsyncClient::new(options, 100);
     let handle = MqttHandle::new(client);
     let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -214,6 +222,37 @@ pub fn spawn(cfg: &MqttConfig, client_id: String, availability_topic: String) ->
         shutdown_flag,
         conn_state: conn_rx,
     }
+}
+
+fn tls_config(tls: bool, ca_path: Option<&Path>) -> Option<ClientConfig> {
+    if !tls && ca_path.is_none() {
+        return None;
+    }
+
+    let ca_certs = if let Some(path) = ca_path {
+        match (path.is_file(), path.is_dir()) {
+            (true, false) => rustls_native_certs::load_certs_from_paths(ca_path, None),
+            (false, true) => rustls_native_certs::load_certs_from_paths(None, ca_path),
+            _ => panic!(
+                "Path does not reference a file or directory: {}",
+                path.display()
+            ),
+        }
+        .expect(&format!(
+            "Could not load certificate(s) from {}",
+            path.display()
+        ))
+    } else {
+        rustls_native_certs::load_native_certs().expect("Could not load system certificates")
+    };
+
+    let mut root_certs = RootCertStore::empty();
+    root_certs.add_parsable_certificates(ca_certs);
+    Some(
+        ClientConfig::builder()
+            .with_root_certificates(root_certs)
+            .with_no_client_auth(),
+    )
 }
 
 async fn run_eventloop(
@@ -356,5 +395,26 @@ mod tests {
         drop(tx);
         let err = join.await.unwrap().expect_err("dropped sender must fail");
         assert!(err.to_string().contains("terminated before connecting"));
+    }
+
+    #[test]
+    fn tls_config_is_absent_when_no_tls_options_are_set() {
+        assert!(tls_config(false, None).is_none());
+    }
+
+    #[test]
+    fn tls_config_is_available_when_tls_is_enabled() {
+        let cert_dir = Path::new("/etc/ssl/certs");
+        let certs = cert_dir.join("ca-certificates.crt");
+
+        assert!(tls_config(true, None).is_some());
+        assert!(tls_config(false, Some(cert_dir)).is_some());
+        assert!(tls_config(true, Some(&certs)).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "Path does not reference a file or directory: missing-ca")]
+    fn panics_on_missing_ca() {
+        tls_config(false, Some(Path::new("missing-ca")));
     }
 }
